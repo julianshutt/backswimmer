@@ -18,6 +18,8 @@ import {
   predatorMesh,
   advanceMozzieTowardPlayer,
   advanceMosquitoLarvaTowardPlayer,
+  advancePlanarianSpitterLocomotion,
+  posePlanarianHeadAim,
   daphniaFlockMemberMesh,
 } from "./sceneMeshes.js";
 import {
@@ -1858,9 +1860,16 @@ export class Game {
       return;
     }
 
+    if (pd.kind === "planarian_spitter" && (live.planarianPhase ?? 0) > 0) return;
+
     live.rangedCd = ra.cooldown;
 
-    this._predSpawnScratch.set(0, 0.07, 0.58);
+    const rig = predGrp.userData?.planarianRig;
+    if (pd.kind === "planarian_spitter" && rig?.headAimGrp) {
+      this._predSpawnScratch.copy(rig.headAimGrp.position);
+    } else {
+      this._predSpawnScratch.set(0, 0.07, 0.58);
+    }
     predGrp.localToWorld(this._predSpawnScratch);
 
     const sx = this._predSpawnScratch.x;
@@ -1896,7 +1905,22 @@ export class Game {
     if (pd.kind === "planarian_spitter") colorHex = 0xff8fe4;
     if (pd.kind === "hydra_pod") colorHex = 0x9eecff;
 
-    this.spawnEnemyBolt(sx, sz, ux, uz, ra.damage, ra.projectileRadius, ra.maxRange, colorHex);
+    let projR = ra.projectileRadius;
+    if (pd.kind === "planarian_spitter") {
+      projR *= THREE.MathUtils.lerp(0.68, 0.96, Math.random());
+    }
+
+    const spawned = this.spawnEnemyBolt(sx, sz, ux, uz, ra.damage, projR, ra.maxRange, colorHex);
+
+    if (spawned && pd.kind === "planarian_spitter") {
+      const ax = predGrp.position.x - playerX;
+      const az = predGrp.position.z - playerZ;
+      const alen = Math.hypot(ax, az) || 1;
+      live.planarianRetreatDx = ax / alen;
+      live.planarianRetreatDz = az / alen;
+      live.planarianPendingRetreat = true;
+      live.planarianSpitAimT = 0.52;
+    }
   }
 
   playerNominalSurfaceY(x, z, elapsed) {
@@ -3051,6 +3075,7 @@ export class Game {
           dt,
           PLAYER_RADIUS,
           this.pos.x,
+          this.pos.y,
           this.pos.z,
           this.yaw,
           pd.chaseSpeed,
@@ -3061,6 +3086,21 @@ export class Game {
           kick,
           predHullR,
           this.playerDead || this.finished,
+          marshConceal,
+          live
+        );
+      } else if (pd.kind === "planarian_spitter") {
+        advancePlanarianSpitterLocomotion(
+          grp,
+          dt,
+          this.pos.x,
+          this.pos.z,
+          pd.chaseSpeed,
+          live.homeX,
+          live.homeZ,
+          engageSq,
+          time,
+          kick,
           marshConceal,
           live
         );
@@ -3101,6 +3141,28 @@ export class Game {
       }
 
       this.tryEnemyRangedFire(grp, pd, live, dt, this.pos.x, this.pos.z, marshConceal);
+
+      if (pd.kind === "planarian_spitter") {
+        const ra = pd.rangedAttack;
+        let aimBlend = 0;
+        if ((live.planarianSpitAimT ?? 0) > 0) {
+          aimBlend = Math.max(aimBlend, THREE.MathUtils.clamp(live.planarianSpitAimT / 0.46, 0, 1));
+        }
+        if (
+          (live.planarianPhase ?? 0) === 0 &&
+          ra &&
+          !marshConceal &&
+          live.rangedCd > 0 &&
+          live.rangedCd < 0.24
+        ) {
+          const grng = Math.hypot(this.pos.x - grp.position.x, this.pos.z - grp.position.z);
+          if (grng <= ra.maxRange) {
+            aimBlend = Math.max(aimBlend, (1 - live.rangedCd / 0.24) * 0.65);
+          }
+        }
+        posePlanarianHeadAim(grp, aimBlend, this.pos.x, this.pos.y, this.pos.z);
+        if ((live.planarianSpitAimT ?? 0) > 0) live.planarianSpitAimT -= dt;
+      }
 
       const meleeR = predHullR;
       const hullOverlap = this.collideDisk(

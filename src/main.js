@@ -31,6 +31,7 @@ const DEBUG_TRACK_ENTRIES = [
   { label: "Procedural pond", value: "procedural" },
   { label: "Tutorial (YAML)", value: "tracks/tutorial.yaml" },
   { label: "Lily loop (YAML)", value: "tracks/lily_loop.yaml" },
+  { label: "Debug · all enemies", value: "tracks/debug/arena_all_enemies.yaml" },
   { label: "Debug · mosquito_larva", value: "tracks/debug/arena_mosquito_larva.yaml" },
   { label: "Debug · planarian_spitter", value: "tracks/debug/arena_planarian_spitter.yaml" },
   { label: "Debug · daphnid_charger", value: "tracks/debug/arena_daphnid_charger.yaml" },

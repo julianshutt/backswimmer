@@ -248,7 +248,7 @@ const PRED_KIND_DEFAULTS = {
       cooldownSec: 2.05,
       maxRange: 17.25,
       projectileSpeed: 11.25,
-      projectileRadius: 0.32,
+      projectileRadius: 0.245,
       leadBias: 0.92,
     },
     weakSpots: [],

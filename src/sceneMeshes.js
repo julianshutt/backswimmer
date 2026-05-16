@@ -914,7 +914,7 @@ export function predatorMozzieMesh() {
  *
  * `attackBlend` drives intensity (1 = glued full-on; 0 = idle swimming).
  */
-export function poseMosquitoLarvaAttack(grp, attackBlend, timeSec, navRollRad = 0) {
+export function poseMosquitoLarvaAttack(grp, attackBlend, timeSec, navRollRad = 0, aimTargetWorld = null) {
   const rig = grp.userData?.mozzieRig;
   if (!rig) return;
 
@@ -925,9 +925,24 @@ export function poseMosquitoLarvaAttack(grp, attackBlend, timeSec, navRollRad = 
   const thr2 = Math.sin(wr + 1.42) * a * 0.42;
 
   if (rig.head?.userData?.mozzieBaseRot) rig.head.rotation.copy(rig.head.userData.mozzieBaseRot);
-  rig.head.rotation.x += Math.sin(wr + 1.96) * 0.058 + a * 0.92;
+  /** Residual wriggle on the head; aim slerp below supplies the primary pitch toward prey. */
+  rig.head.rotation.x += Math.sin(wr + 1.96) * 0.058 + a * 0.18;
   rig.head.rotation.z += Math.sin(wr2 * 1.06) * 0.22 * a + navRollRad * 0.18;
   rig.head.rotation.y += Math.sin(timeSec * 17.85) * 0.11 * a;
+
+  /** Crane the head capsule onto the swimmer; mouth-forward is local +Z (brushes sit at +Z). */
+  if (aimTargetWorld && rig.head?.parent) {
+    rig.head.parent.updateMatrixWorld();
+    _mozzieHeadWorld.setFromMatrixPosition(rig.head.matrixWorld);
+    _mozzieAimDir.subVectors(aimTargetWorld, _mozzieHeadWorld);
+    if (_mozzieAimDir.lengthSq() > 1e-6) {
+      _mozzieAimDir.normalize();
+      rig.head.parent.getWorldQuaternion(_mozzieParentQInv).invert();
+      _mozzieAimDir.applyQuaternion(_mozzieParentQInv);
+      _mozzieAimQ.setFromUnitVectors(MOZZIE_HEAD_FORWARD, _mozzieAimDir);
+      rig.head.quaternion.slerp(_mozzieAimQ, a * 0.85);
+    }
+  }
 
   if (rig.thorax?.userData?.mozzieBaseRot) rig.thorax.rotation.copy(rig.thorax.userData.mozzieBaseRot);
   rig.thorax.rotation.x += a * (0.36 + thr);
@@ -964,6 +979,14 @@ export function poseMosquitoLarvaAttack(grp, attackBlend, timeSec, navRollRad = 
   }
 }
 
+/** Scratch math objects for head-aim slerp; reused per-frame to avoid GC churn. */
+const MOZZIE_HEAD_FORWARD = new THREE.Vector3(0, 0, 1);
+const _mozzieHeadWorld = new THREE.Vector3();
+const _mozzieAimDir = new THREE.Vector3();
+const _mozzieParentQInv = new THREE.Quaternion();
+const _mozzieAimQ = new THREE.Quaternion();
+const _mozzieAimTarget = new THREE.Vector3();
+
 const MOZZIE_ATTACH_PLAYER_RUN = 68;
 /** Fallback if swimmer idles pinned — forces satiation & retreat. */
 const MOZZIE_ATTACH_MAX_SEC = 18.5;
@@ -985,6 +1008,7 @@ export function advanceMosquitoLarvaTowardPlayer(
   dt,
   playerRadius,
   playerX,
+  playerY,
   playerZ,
   playerYaw,
   chaseSpeedBase,
@@ -1131,7 +1155,9 @@ export function advanceMosquitoLarvaTowardPlayer(
   const kick = typeof damageKickRad === "number" && Number.isFinite(damageKickRad) ? damageKickRad : 0;
   grp.rotation.z = baseRoll + kick;
 
-  poseMosquitoLarvaAttack(grp, attach01, timeSec, grp.rotation.z * 0.35);
+  const aimY = Number.isFinite(playerY) ? playerY : grp.position.y;
+  _mozzieAimTarget.set(playerX, aimY, playerZ);
+  poseMosquitoLarvaAttack(grp, attach01, timeSec, grp.rotation.z * 0.35, _mozzieAimTarget);
 
   return moved;
 }
@@ -1200,10 +1226,17 @@ export function predatorPlanarianMesh() {
   eyeRMesh.position.set(ptEyes.x - perp.x, ptEyes.y + 0.048, ptEyes.z - perp.z);
 
   const suckerTip = wormCurve.getPointAt(0.998);
+  const headPivot = suckerTip.clone();
+  headPivot.y += 0.024;
+
+  /** Anterior disc + spit glow parented for look-at while firing. */
+  const headAimGrp = new THREE.Group();
+  headAimGrp.position.copy(headPivot);
+
   const sucker = new THREE.Mesh(new THREE.SphereGeometry(0.074, 10, 8), dorsal.clone());
   sucker.material.roughness = 0.28;
   sucker.scale.set(0.92, 0.42, 0.9);
-  sucker.position.copy(suckerTip.clone().setY(suckerTip.y + 0.024));
+  sucker.position.set(0, 0, 0);
 
   const pitPt = wormCurve.getPointAt(0.54);
   const pharynxPit = new THREE.Mesh(new THREE.TorusGeometry(0.048, 0.014, 8, 20), dorsal.clone());
@@ -1226,18 +1259,32 @@ export function predatorPlanarianMesh() {
   );
   spitGlow.rotation.x = -Math.PI / 2;
   const glowPt = wormCurve.getPointAt(0.84);
-  spitGlow.position.set(glowPt.x + 0.08, glowPt.y - 0.02, glowPt.z + 0.02);
+  spitGlow.position.set(
+    glowPt.x + 0.08 - headPivot.x,
+    glowPt.y - 0.02 - headPivot.y,
+    glowPt.z + 0.02 - headPivot.z
+  );
   spitGlow.scale.setScalar(1 / SCALE);
+
+  headAimGrp.add(sucker, spitGlow);
+
+  let headRefForward = wormCurve.getTangentAt(0.998).clone();
+  if (headRefForward.lengthSq() < 1e-10) headRefForward = new THREE.Vector3(0, 0, 1);
+  else headRefForward.normalize();
 
   grp.add(
     ribbon,
     dorsalBand,
     eyeLMesh,
     eyeRMesh,
-    sucker,
     pharynxPit,
-    spitGlow
+    headAimGrp
   );
+
+  grp.userData.planarianRig = {
+    headAimGrp,
+    headRefForward,
+  };
 
   grp.traverse((o) => {
     if ("isMesh" in o && o.isMesh && o.material && !Array.isArray(o.material)) {
@@ -1256,6 +1303,120 @@ export function predatorPlanarianMesh() {
   attachHpStripForScaledPredator(grp, SCALE, hpHud);
   grp.userData.idlePhase = Math.random() * Math.PI * 2;
   return grp;
+}
+
+const _planarianHeadWorld = new THREE.Vector3();
+const _planarianAimDir = new THREE.Vector3();
+const _planarianGrpQInv = new THREE.Quaternion();
+const _planarianAimQ = new THREE.Quaternion();
+
+/** Aim anterior sucker + spit glow at the swimmer (full blend while `aimBlend` → 1). */
+export function posePlanarianHeadAim(grp, aimBlend, playerX, playerY, playerZ) {
+  const rig = grp.userData?.planarianRig;
+  if (!rig?.headAimGrp || !rig.headRefForward) return;
+  const b = THREE.MathUtils.clamp(aimBlend, 0, 1);
+  if (b <= 0.012) {
+    rig.headAimGrp.quaternion.identity();
+    return;
+  }
+  _planarianHeadWorld.copy(rig.headAimGrp.position);
+  grp.localToWorld(_planarianHeadWorld);
+  _planarianAimDir.set(playerX, playerY, playerZ).sub(_planarianHeadWorld);
+  if (_planarianAimDir.lengthSq() < 1e-8) return;
+  _planarianAimDir.normalize();
+  grp.getWorldQuaternion(_planarianGrpQInv);
+  _planarianGrpQInv.invert();
+  _planarianAimDir.applyQuaternion(_planarianGrpQInv);
+  _planarianAimQ.setFromUnitVectors(rig.headRefForward, _planarianAimDir);
+  rig.headAimGrp.quaternion.slerp(_planarianAimQ, b * 0.94);
+}
+
+const PLANARIAN_RETREAT_SEC = 1.42;
+const PLANARIAN_WAIT_MIN = 2.35;
+const PLANARIAN_WAIT_RAND = 1.45;
+
+/**
+ * Planarian spitter locomotion: phase 0 = stalk like other grazers; 1 = snake retreat after a spit;
+ * 2 = brief pause before re-engaging.
+ */
+export function advancePlanarianSpitterLocomotion(
+  grp,
+  dt,
+  playerX,
+  playerZ,
+  chaseSpeed,
+  anchorX,
+  anchorZ,
+  engageRadiusSq,
+  timeSec,
+  damageKickRad = 0,
+  marshConceal = false,
+  live
+) {
+  if (typeof live.planarianPhase !== "number") live.planarianPhase = 0;
+
+  if (live.planarianPendingRetreat) {
+    live.planarianPendingRetreat = false;
+    live.planarianPhase = 1;
+    live.planarianRetreatElapsed = 0;
+    live.planarianSpitAimT = 0;
+  }
+
+  if (live.planarianPhase === 1) {
+    live.planarianRetreatElapsed = (live.planarianRetreatElapsed ?? 0) + dt;
+    const idle = grp.userData.idlePhase ?? 0;
+    const baseSpd = Math.max(Number(chaseSpeed) || 0, 0.08) * 1.36;
+    const w = Math.sin(timeSec * 8.65 + idle) * 0.52;
+    const ca = Math.cos(w);
+    const sa = Math.sin(w);
+    const rdx = live.planarianRetreatDx ?? 0;
+    const rdz = live.planarianRetreatDz ?? 1;
+    const mx = rdx * ca - rdz * sa;
+    const mz = rdx * sa + rdz * ca;
+    const ml = Math.hypot(mx, mz) || 1;
+    const ux = mx / ml;
+    const uz = mz / ml;
+    const step = baseSpd * dt;
+    grp.position.x += ux * step;
+    grp.position.z += uz * step;
+    grp.rotation.y = -Math.atan2(ux, uz);
+    grp.rotation.order = "YXZ";
+    const baseRoll = Math.sin(timeSec * 10.8 + idle) * 0.19;
+    const kick = typeof damageKickRad === "number" && Number.isFinite(damageKickRad) ? damageKickRad : 0;
+    grp.rotation.z = baseRoll + kick;
+    if (live.planarianRetreatElapsed >= PLANARIAN_RETREAT_SEC) {
+      live.planarianPhase = 2;
+      live.planarianWaitT = PLANARIAN_WAIT_MIN + Math.random() * PLANARIAN_WAIT_RAND;
+      live.planarianRetreatElapsed = 0;
+    }
+    return;
+  }
+
+  if (live.planarianPhase === 2) {
+    live.planarianWaitT = (live.planarianWaitT ?? 0) - dt;
+    grp.rotation.order = "YXZ";
+    const idle = grp.userData.idlePhase ?? 0;
+    grp.rotation.z = Math.sin(timeSec * 7.1 + idle) * 0.07;
+    if (live.planarianWaitT <= 0) {
+      live.planarianPhase = 0;
+      live.planarianWaitT = 0;
+    }
+    return;
+  }
+
+  advanceMozzieTowardPlayer(
+    grp,
+    dt,
+    playerX,
+    playerZ,
+    chaseSpeed,
+    anchorX,
+    anchorZ,
+    engageRadiusSq,
+    timeSec,
+    damageKickRad,
+    marshConceal
+  );
 }
 
 /** Cladoceran riff — hinged bivalve carapace, rostral beak & paired antennae, brood-pocket read. */

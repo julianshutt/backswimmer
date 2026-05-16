@@ -1,0 +1,44 @@
+# Debug — every predator kind + Daphnia flocks (open water, short lap).
+metadata:
+  name: "Debug — all enemies"
+  laps: 8
+  courseRibbon: false
+
+spawn:
+  position: [0, 0.35, 16]
+  yawDeg: 180
+
+checkpoints:
+  - position: [0, 0.35, -26]
+    radius: 18
+  - position: [0, 0.35, 20]
+    radius: 16
+
+food: []
+
+obstacles:
+  # Fleeing micro-flocks (obstacles.daphnia — boids + hull scrape + splash / fin-kick burst)
+  daphnia:
+    - position: [-12, 0.32, -12]
+      count: 11
+      spread: 4.2
+      fleeSpeed: 7.4
+      scareRadius: 16
+      splashHitRadius: 3.25
+    - position: [14, 0.32, -16]
+      count: 10
+      spread: 3.8
+      fleeSpeed: 7.1
+      pointValuePer: 28
+
+  predators:
+    - type: mosquito_larva
+      position: [-22, 0.38, -10]
+    - type: planarian_spitter
+      position: [22, 0.4, -10]
+    - type: daphnid_charger
+      position: [0, 0.39, -24]
+    - type: hydra_pod
+      position: [-28, 0.4, -22]
+    - type: waterscorpion_tank
+      position: [28, 0.44, -22]

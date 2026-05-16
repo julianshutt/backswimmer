@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="225" viewBox="0 0 400 225">
+  <defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#1a3a48"/><stop offset="1" stop-color="#0a1820"/></linearGradient></defs>
+  <rect width="400" height="225" fill="url(#g)"/>
+  <text x="200" y="105" fill="#b8f0ff" font-family="system-ui,sans-serif" font-size="15" text-anchor="middle">daphnia flock</text>
+  <text x="200" y="132" fill="#78b0c8" font-family="system-ui,sans-serif" font-size="11" text-anchor="middle">Replace with in-game screenshot if you like</text>
+</svg>
