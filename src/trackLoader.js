@@ -279,8 +279,8 @@ const PRED_KIND_DEFAULTS = {
     shellContactBleed: 0,
     visualMultiplier: 1,
     ranged: {
-      damage: 14.25,
-      cooldownSec: 2.42,
+      damage: 13.1,
+      cooldownSec: 2.58,
       maxRange: 18.85,
       projectileSpeed: 9.95,
       projectileRadius: 0.52,

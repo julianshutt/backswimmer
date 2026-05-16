@@ -1415,7 +1415,68 @@ export function advancePlanarianSpitterLocomotion(
     engageRadiusSq,
     timeSec,
     damageKickRad,
-    marshConceal
+    marshConceal,
+    1,
+    null
+  );
+}
+
+/**
+ * Daphnid: periodic **dart bursts** toward the swimmer between brief loafing windows (reads faster than flat chase).
+ */
+export function advanceDaphnidChargerTowardPlayer(
+  grp,
+  dt,
+  playerX,
+  playerZ,
+  chaseSpeed,
+  anchorX,
+  anchorZ,
+  engageRadiusSq,
+  timeSec,
+  damageKickRad = 0,
+  marshConceal = false,
+  live
+) {
+  if (typeof live.daphBurstCd !== "number") live.daphBurstCd = 0.35 + Math.random() * 0.55;
+  if (typeof live.daphBurstT !== "number") live.daphBurstT = 0;
+  live.daphBurstCd -= dt;
+
+  const lx = grp.position.x;
+  const lz = grp.position.z;
+  const vx = playerX - lx;
+  const vz = playerZ - lz;
+  const distSq = vx * vx + vz * vz;
+  const engaged = !marshConceal && distSq <= engageRadiusSq && distSq > 1e-6;
+
+  let speedScale = 1;
+  if (engaged) {
+    if (live.daphBurstT > 0) {
+      live.daphBurstT -= dt;
+      speedScale = 1.72;
+    } else if (live.daphBurstCd <= 0 && distSq > 9 && distSq < engageRadiusSq * 0.92) {
+      live.daphBurstT = 0.4 + Math.random() * 0.08;
+      live.daphBurstCd = 2.05 + Math.random() * 0.75;
+      speedScale = 1.72;
+    } else {
+      speedScale = distSq > 100 ? 0.92 : 1.06;
+    }
+  }
+
+  advanceMozzieTowardPlayer(
+    grp,
+    dt,
+    playerX,
+    playerZ,
+    chaseSpeed,
+    anchorX,
+    anchorZ,
+    engageRadiusSq,
+    timeSec,
+    damageKickRad,
+    marshConceal,
+    speedScale,
+    null
   );
 }
 
@@ -1909,7 +1970,10 @@ export function predatorMesh(kind) {
   }
 }
 
-/** Pursue target when closer than √engageRadiusSq; otherwise idle near anchor. Larva rolls toward motion. */
+/** Pursue target when closer than √engageRadiusSq; otherwise idle near anchor. Larva rolls toward motion.
+ * @param {number} [speedScale] — multiplier on `chaseSpeed` (e.g. daphnid sprint burst).
+ * @param {{ x: number; z: number } | null} [chaseOverride] — when engaged, steer toward this XZ instead of the player (waterscorpion strafe).
+ */
 export function advanceMozzieTowardPlayer(
   grp,
   dt,
@@ -1921,7 +1985,9 @@ export function advanceMozzieTowardPlayer(
   engageRadiusSq,
   timeSec,
   damageKickRad = 0,
-  playerMarshConcealed = false
+  playerMarshConcealed = false,
+  speedScale = 1,
+  chaseOverride = null
 ) {
   const lx = grp.position.x;
   const lz = grp.position.z;
@@ -1931,8 +1997,17 @@ export function advanceMozzieTowardPlayer(
   const vx = playerX - lx;
   const vz = playerZ - lz;
   if (!playerMarshConcealed && vx * vx + vz * vz <= engageRadiusSq) {
-    tx = playerX;
-    tz = playerZ;
+    if (
+      chaseOverride &&
+      Number.isFinite(chaseOverride.x) &&
+      Number.isFinite(chaseOverride.z)
+    ) {
+      tx = chaseOverride.x;
+      tz = chaseOverride.z;
+    } else {
+      tx = playerX;
+      tz = playerZ;
+    }
   } else {
     const ph = grp.userData.idlePhase ?? 0;
     const bob = Math.sin(timeSec * 0.82 + ph) * 0.06;
@@ -1946,8 +2021,9 @@ export function advanceMozzieTowardPlayer(
   const wl = Math.hypot(wx, wz);
 
   let moved = wl > 1e-4;
+  const spdMul = Number.isFinite(speedScale) ? THREE.MathUtils.clamp(speedScale, 0.18, 3.2) : 1;
   if (moved) {
-    const step = Math.min(Math.max(Number(chaseSpeed) || 0, 0) * dt, wl);
+    const step = Math.min(Math.max(Number(chaseSpeed) || 0, 0) * spdMul * dt, wl);
     grp.position.x += (wx / wl) * step;
     grp.position.z += (wz / wl) * step;
     wx = wx / wl;

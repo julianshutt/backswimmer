@@ -17,6 +17,7 @@ import {
   advanceRival,
   predatorMesh,
   advanceMozzieTowardPlayer,
+  advanceDaphnidChargerTowardPlayer,
   advanceMosquitoLarvaTowardPlayer,
   advancePlanarianSpitterLocomotion,
   posePlanarianHeadAim,
@@ -1838,6 +1839,41 @@ export class Game {
     );
   }
 
+  /**
+   * Waterscorpion tank: occasional **broadside strafe** — offsets chase target perpendicular to the line to the swimmer.
+   * @returns {{ x: number; z: number } | null}
+   */
+  waterScorpionChaseOverride(grp, live, dt, playerX, playerZ, engageRadiusSq) {
+    if (typeof live.scorpStrafeCd !== "number") live.scorpStrafeCd = 0.65 + Math.random() * 0.45;
+    if (typeof live.scorpStrafeT !== "number") live.scorpStrafeT = 0;
+    if (typeof live.scorpStrafeSign !== "number") live.scorpStrafeSign = Math.random() < 0.5 ? -1 : 1;
+    live.scorpStrafeCd -= dt;
+
+    const dx = playerX - grp.position.x;
+    const dz = playerZ - grp.position.z;
+    const d2 = dx * dx + dz * dz;
+    if (d2 > engageRadiusSq || d2 < 0.04) return null;
+    const dist = Math.sqrt(d2);
+
+    if (live.scorpStrafeT > 0) {
+      live.scorpStrafeT -= dt;
+      const inv = 1 / dist;
+      const px = -dz * inv * live.scorpStrafeSign;
+      const pz = dx * inv * live.scorpStrafeSign;
+      return { x: playerX + px * 4.85, z: playerZ + pz * 4.85 };
+    }
+    if (live.scorpStrafeCd <= 0 && dist > 5.2 && dist < 17) {
+      live.scorpStrafeT = 0.56 + Math.random() * 0.1;
+      live.scorpStrafeCd = 3.35 + Math.random() * 1.15;
+      live.scorpStrafeSign *= -1;
+      const inv = 1 / dist;
+      const px = -dz * inv * live.scorpStrafeSign;
+      const pz = dx * inv * live.scorpStrafeSign;
+      return { x: playerX + px * 4.85, z: playerZ + pz * 4.85 };
+    }
+    return null;
+  }
+
   tryEnemyRangedFire(predGrp, pd, live, dt, playerX, playerZ, playerMarshConcealed = false) {
     const ra = pd.rangedAttack;
     if (!ra || live.hpNow <= 0 || dt <= 0) return;
@@ -1850,6 +1886,49 @@ export class Game {
     const pdx = playerX - gx;
     const pdz = playerZ - gz;
     const rng = Math.hypot(pdx, pdz);
+
+    /** Hydra: delayed second nematocyst — whip angle, lighter sting (paired rhythm vs planarian single glob). */
+    if (pd.kind === "hydra_pod" && (live.hydraRippleDelay ?? 0) > 0) {
+      live.hydraRippleDelay -= dt;
+      if (live.hydraRippleDelay <= 0) {
+        live.hydraRippleDelay = 0;
+        if (!playerMarshConcealed && rng <= ra.maxRange && live.hpNow > 0) {
+          this._predSpawnScratch.set(0, 0.07, 0.58);
+          predGrp.localToWorld(this._predSpawnScratch);
+          const rsx = this._predSpawnScratch.x;
+          const rsz = this._predSpawnScratch.z;
+          let rdx = playerX - rsx;
+          let rdz = playerZ - rsz;
+          let rl = Math.hypot(rdx, rdz);
+          if (rl > 1e-4) {
+            rdx /= rl;
+            rdz /= rl;
+          } else if (rng > 1e-4) {
+            rdx = pdx / rng;
+            rdz = pdz / rng;
+          } else {
+            rdx = 0;
+            rdz = 1;
+          }
+          const ripSign = live._hydraRippleSign ?? 1;
+          const ang = 0.31 * ripSign;
+          const c = Math.cos(ang);
+          const s = Math.sin(ang);
+          const rSpd = ra.projectileSpeed * 0.9;
+          const rux = (rdx * c - rdz * s) * rSpd;
+          const ruz = (rdx * s + rdz * c) * rSpd;
+          const rippleDmg =
+            typeof live._hydraRippleDmg === "number" && Number.isFinite(live._hydraRippleDmg)
+              ? live._hydraRippleDmg
+              : ra.damage * 0.35;
+          const ripplePr =
+            typeof live._hydraRipplePr === "number" && Number.isFinite(live._hydraRipplePr)
+              ? live._hydraRipplePr
+              : ra.projectileRadius * 0.78;
+          this.spawnEnemyBolt(rsx, rsz, rux, ruz, rippleDmg, ripplePr, ra.maxRange, 0x9eecff);
+        }
+      }
+    }
 
     if (rng > ra.maxRange) return;
     if (live.rangedCd > 0) return;
@@ -1920,6 +1999,11 @@ export class Game {
       live.planarianRetreatDz = az / alen;
       live.planarianPendingRetreat = true;
       live.planarianSpitAimT = 0.52;
+    } else if (spawned && pd.kind === "hydra_pod") {
+      live.hydraRippleDelay = 0.17 + Math.random() * 0.045;
+      live._hydraRippleDmg = ra.damage * 0.36;
+      live._hydraRipplePr = ra.projectileRadius * 0.79;
+      live._hydraRippleSign = Math.random() < 0.5 ? -1 : 1;
     }
   }
 
@@ -3104,7 +3188,26 @@ export class Game {
           marshConceal,
           live
         );
+      } else if (pd.kind === "daphnid_charger") {
+        advanceDaphnidChargerTowardPlayer(
+          grp,
+          dt,
+          this.pos.x,
+          this.pos.z,
+          pd.chaseSpeed,
+          live.homeX,
+          live.homeZ,
+          engageSq,
+          time,
+          kick,
+          marshConceal,
+          live
+        );
       } else {
+        const scorpOvr =
+          pd.kind === "waterscorpion_tank"
+            ? this.waterScorpionChaseOverride(grp, live, dt, this.pos.x, this.pos.z, engageSq)
+            : null;
         advanceMozzieTowardPlayer(
           grp,
           dt,
@@ -3116,7 +3219,9 @@ export class Game {
           engageSq,
           time,
           kick,
-          marshConceal
+          marshConceal,
+          1,
+          scorpOvr
         );
       }
       const pdx = grp.position.x - ox;
