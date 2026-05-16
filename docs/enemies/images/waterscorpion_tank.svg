@@ -1,6 +1,30 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="400" height="225" viewBox="0 0 400 225">
-  <defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#2a2820"/><stop offset="1" stop-color="#121008"/></linearGradient></defs>
-  <rect width="400" height="225" fill="url(#g)"/>
-  <text x="200" y="105" fill="#d4c8a8" font-family="system-ui,sans-serif" font-size="15" text-anchor="middle">waterscorpion_tank</text>
-  <text x="200" y="132" fill="#988870" font-family="system-ui,sans-serif" font-size="11" text-anchor="middle">Replace with in-game screenshot if you like</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 200" width="460" height="200" aria-labelledby="title-scorpion">
+  <title id="title-scorpion">Waterscorpion tank — side silhouette from predatorWaterScorpionTankMesh (+Z right)</title>
+  <rect width="460" height="200" fill="#12100c"/>
+  <g transform="translate(28,98)">
+    <!-- abdomen z=-0.74 scale 0.94×1.92 on r=0.72 -->
+    <ellipse cx="-120" cy="4" rx="130" ry="38" fill="#5f4f38"/>
+    <!-- keel -->
+    <rect x="-210" y="-22" width="175" height="6" rx="1" fill="#2a2318" transform="rotate(-2 -120 4)"/>
+    <!-- wing pads z=-0.28 x≈±0.52 — side view shows both as dorsal bumps -->
+    <ellipse cx="-148" cy="-12" rx="14" ry="10" fill="#4a4030" transform="rotate(-20 -148 -12)"/>
+    <ellipse cx="-88" cy="-12" rx="14" ry="10" fill="#4a4030" transform="rotate(18 -88 -12)"/>
+    <!-- tail seg z=-1.74 -->
+    <path fill="#b89b6b" d="M-228,-6 L-268,2 L-266,16 L-230,14 Z"/>
+    <path fill="#b89b6b" d="M-262,8 L-302,18 L-298,32 L-258,24 Z"/>
+    <!-- thorax z=0.72 -->
+    <ellipse cx="75" cy="-2" rx="36" ry="28" fill="#b89b6b"/>
+    <!-- raptorial forelimbs -->
+    <path fill="#5f4f38" d="M52,8 L28,38 L18,32 L38,4Z" opacity="0.9"/>
+    <path fill="#5f4f38" d="M98,8 L122,38 L132,32 L112,4Z" opacity="0.9"/>
+    <!-- rowing paddles z=-1.06 -->
+    <rect x="-72" y="14" width="12" height="68" rx="2" fill="#5f4f38" transform="rotate(-25 -66 48)"/>
+    <rect x="-150" y="18" width="12" height="68" rx="2" fill="#5f4f38" transform="rotate(25 -144 52)"/>
+    <!-- eyes z=1.14 -->
+    <circle cx="102" cy="-28" r="12" fill="#1a0810"/>
+    <circle cx="138" cy="-28" r="12" fill="#1a0810"/>
+    <circle cx="104" cy="-30" r="11" fill="#e8f4ff" opacity="0.28"/>
+    <circle cx="140" cy="-30" r="11" fill="#e8f4ff" opacity="0.28"/>
+  </g>
+  <text x="230" y="188" fill="#8a7860" font-size="10" font-family="system-ui,sans-serif" text-anchor="middle">Side view · tail left, eyes + raptorial arms right (COLORS.scorpion*)</text>
 </svg>

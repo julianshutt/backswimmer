@@ -6,7 +6,16 @@ Sandbox track with **every predator** plus **Daphnia flocks**:
 
 Enable **Debug** mode and pick **Debug · all enemies** in the track bar, or load that YAML via your usual flow.
 
-Images below are **placeholder SVGs** under `docs/enemies/images/`. Swap them for PNG/JPEG screenshots from the game if you want a photo board (same filenames work if you change the extension and update the links).
+Illustrations in `docs/enemies/images/*.svg` are **schematic silhouettes** derived from the same dimensions and colors as the Three.js meshes in `src/sceneMeshes.js` (sphere radii, `wormCurve` points, cylinder lengths, `COLORS`, etc.). They are not in-engine renders — use them as a quick shape reference; you can still replace any file with a PNG screenshot if you prefer.
+
+| Enemy / flock | Mesh builder (source of truth for the diagram) |
+|---------------|-----------------------------------------------|
+| Mosquito larva | `predatorMozzieMesh` |
+| Planarian | `predatorPlanarianMesh` (`wormCurve`, `headAimGrp`) |
+| Daphnid charger | `predatorDaphnidMesh` |
+| Hydra pod | `predatorHydraPodMesh` |
+| Waterscorpion tank | `predatorWaterScorpionTankMesh` |
+| Daphnia flock member | `daphniaFlockMemberMesh` |
 
 ---
 
