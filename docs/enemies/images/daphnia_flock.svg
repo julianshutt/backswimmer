@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 200" width="420" height="200">
+  <rect width="420" height="200" fill="#0a1e1c"/>
+  <g transform="translate(210,100)">
+    <ellipse cx="0" cy="4" rx="40" ry="26" fill="#3aab98" opacity="0.8"/>
+    <ellipse cx="0" cy="4" rx="36" ry="22" fill="#1a5c52" opacity="0.25"/>
+    <circle cx="0" cy="-18" r="8" fill="#040c10"/>
+    <circle cx="0" cy="-20" r="6" fill="#ffefb8" opacity="0.35"/>
+    <line x1="28" y1="-4" x2="68" y2="-38" stroke="#3aab98" stroke-width="3" stroke-linecap="round" opacity="0.85"/>
+    <line x1="-28" y1="-4" x2="-68" y2="-38" stroke="#3aab98" stroke-width="3" stroke-linecap="round" opacity="0.85"/>
+    <path fill="#3aab98" d="M-10,22 L10,22 L0,52 Z" opacity="0.88"/>
+  </g>
+  <g opacity="0.35">
+    <ellipse cx="118" cy="112" rx="28" ry="18" fill="#3aab98"/>
+    <ellipse cx="312" cy="118" rx="24" ry="15" fill="#3aab98"/>
+    <ellipse cx="260" cy="78" rx="22" ry="14" fill="#3aab98"/>
+  </g>
+  <text x="210" y="188" fill="#5a9888" font-size="10" font-family="system-ui,sans-serif" text-anchor="middle">Center: mesh, faint: flock</text>
+</svg>

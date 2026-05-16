@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 200" width="420" height="200">
+  <rect width="420" height="200" fill="#1a1220"/>
+  <path fill="none" stroke="#f5e8f0" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"
+    d="M 48 104 C 95 118, 125 72, 175 96 S 255 88, 305 100 S 365 92, 378 104"/>
+  <path fill="none" stroke="#d95aa4" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" opacity="0.92"
+    d="M 48 104 C 95 118, 125 72, 175 96 S 255 88, 305 100 S 365 92, 378 104"/>
+  <circle cx="318" cy="88" r="5" fill="#1a1018"/>
+  <circle cx="332" cy="98" r="5" fill="#1a1018"/>
+  <ellipse cx="384" cy="104" rx="12" ry="7" fill="#d95aa4" opacity="0.95"/>
+  <ellipse cx="205" cy="96" rx="10" ry="4" fill="none" stroke="#4a2740" stroke-width="2" transform="rotate(-8 205 96)"/>
+  <ellipse cx="350" cy="90" rx="16" ry="8" fill="none" stroke="#ff8fd8" stroke-width="2" opacity="0.8"/>
+  <text x="210" y="188" fill="#886688" font-size="10" font-family="system-ui,sans-serif" text-anchor="middle">XZ wormCurve, anterior right</text>
+</svg>
