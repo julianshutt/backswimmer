@@ -200,6 +200,17 @@ const WEAK_SCORPION_PRESET_RAW = [
   { key: "tail", offset: [0.0, 0.12, -1.48], radius: 0.5 },
 ];
 
+/** Kill score defaults per grazer/analogue kind (`points`/`score` in YAML overrides). */
+export const PRESET_PREDATOR_KILL_POINTS = {
+  mosquito_larva: 52,
+  planarian_spitter: 138,
+  daphnid_charger: 74,
+  hydra_pod: 172,
+  waterscorpion_tank: 340,
+  /** Unknown kinds reuse this unless YAML sets `points`/`score`. */
+  default: 58,
+};
+
 /** Fallback preset per `kind` — YAML fields override clamps / extend weak spots / ranged blobs. */
 const PRED_KIND_DEFAULTS = {
   mosquito_larva: {
@@ -308,6 +319,8 @@ function normalizePredator(o, idx) {
   const typ = typeof raw.type === "string" && raw.type.trim() ? raw.type.trim() : "mosquito_larva";
   const pos = vec3(raw.position, [(idx % 4) * 4 - 2, 0.32, -20 - idx * 5]);
   const preset = PRED_KIND_DEFAULTS[typ] ?? PRED_FALLBACK_KIND;
+  const killPtsFallback =
+    (typ && PRESET_PREDATOR_KILL_POINTS[typ]) ?? PRESET_PREDATOR_KILL_POINTS.default;
 
   /** `weakSpots: []` clears inherited defaults; omission keeps preset weak spots on armoured kinds. */
   let weakNorm;
@@ -353,6 +366,12 @@ function normalizePredator(o, idx) {
     weakSpots: weakNorm,
     rangedAttack: rangedOut,
     shellContactBleed: shellBleed,
+    pointValue: clampNum(
+      raw.points ?? raw.pointValue ?? raw.score ?? killPtsFallback,
+      killPtsFallback,
+      0,
+      999999
+    ),
   };
 }
 

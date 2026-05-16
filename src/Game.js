@@ -1,5 +1,6 @@
 import * as THREE from "three";
-import { loadTrack } from "./trackLoader.js";
+import { loadTrack, mergeTrackDefaults } from "./trackLoader.js";
+import { generateProceduralTrackRaw } from "./proceduralTrack.js";
 import { buildCourseRibbon, buildCheckpointMarkers } from "./courseVisuals.js";
 import {
   COLORS,
@@ -17,6 +18,15 @@ import {
   advanceMozzieTowardPlayer,
   createHpStripSprite,
 } from "./sceneMeshes.js";
+import {
+  createTiledWaterMaps,
+  SurfaceWakePool,
+  createAnimatedWaterMaterial,
+  waterSurfaceDisplacementY,
+} from "./waterFX.js";
+import { createPondReedField, updatePondReeds } from "./pondReeds.js";
+import { createPondStoneBed } from "./pondBed.js";
+import { createPondSkyDome } from "./skyDome.js";
 
 const PLAYER_RADIUS = 0.58;
 
@@ -121,6 +131,93 @@ const VENOM_HIT_BURST_SECONDS = 0.3;
 /** Broad-phase band pad so tail/eye probes still test even if hull centroid grazes sideways. */
 const VENOM_BROAD_SQ_PAD = (VENOM_BITE_RANGE + 17) ** 2;
 
+/** Fin-strike lane (no saliva cost) — charge <kbd>F</kbd> for radial mega splash or overhold self-harm. */
+const STRIKE_KICK = {
+  cooldown: 0.44,
+  /** Peak syncopation on hind-leg stroke + hull pitch */
+  poseSeconds: 0.38,
+  forwardSurge: 0.55,
+};
+const KICK_STRIKE_FORWARD_INSET = 0.72;
+/** Shorter legs-only reach vs venom spray. */
+const KICK_STRIKE_RANGE = 7.68;
+/** ~35° half — ~70° frontal fan (must aim the lunge vs ~104° venom cone). */
+const KICK_STRIKE_COS_HALF_FAN = Math.cos(THREE.MathUtils.degToRad(35));
+const KICK_NEAR_DMG_MULT = 1.04;
+const KICK_FAR_DMG_MULT = 0.1;
+/** Base prey chip (~half of saliva at comparable aim / distance tiers). */
+const KICK_STRIKE_PREY_KILL = 1.02;
+/** Broad-phase padded like venom, shorter core range. */
+const KICK_STRIKE_BROAD_SQ_PAD = (KICK_STRIKE_RANGE + 13) ** 2;
+
+/** Seconds held — tap / partial / mega / tired / overhold (self harm on last). */
+const FIN_KICK_CHARGE = {
+  tapMax: 0.2,
+  partialMax: 0.355,
+  megaMin: 0.38,
+  megaMax: 0.765,
+  overholdMin: 0.92,
+  selfHarm: 14.5,
+  megaChromSeconds: 0.62,
+};
+
+/**
+ * `cosHalfFan` ≤ −1 ⇒ omnidirectional weak-spot checks (mega / overhold fizzler).
+ * @type {Record<string, { range: number; cosHalfFan: number; chipMul: number; forwardSurge: number; poseSeconds: number; cooldown: number; broadExtra: number; burstVen: boolean }>}
+ */
+const FIN_KICK_SPECS = {
+  tap: {
+    range: KICK_STRIKE_RANGE,
+    cosHalfFan: KICK_STRIKE_COS_HALF_FAN,
+    chipMul: 1,
+    forwardSurge: STRIKE_KICK.forwardSurge,
+    poseSeconds: STRIKE_KICK.poseSeconds,
+    cooldown: STRIKE_KICK.cooldown,
+    broadExtra: 13,
+    burstVen: true,
+  },
+  partial: {
+    range: 8.85,
+    cosHalfFan: Math.cos(THREE.MathUtils.degToRad(40)),
+    chipMul: 1.3,
+    forwardSurge: 0.6,
+    poseSeconds: 0.4,
+    cooldown: 0.48,
+    broadExtra: 13,
+    burstVen: true,
+  },
+  mega: {
+    range: 17.35,
+    cosHalfFan: -1.5,
+    chipMul: 3.42,
+    forwardSurge: 1.04,
+    poseSeconds: 0.58,
+    cooldown: 0.88,
+    broadExtra: 20,
+    burstVen: false,
+  },
+  tired: {
+    range: 10.15,
+    cosHalfFan: Math.cos(THREE.MathUtils.degToRad(46)),
+    chipMul: 1.52,
+    forwardSurge: 0.66,
+    poseSeconds: 0.42,
+    cooldown: 0.54,
+    broadExtra: 14,
+    burstVen: true,
+  },
+  overhold: {
+    range: 6.95,
+    cosHalfFan: -1.5,
+    chipMul: 0.42,
+    forwardSurge: 0.34,
+    poseSeconds: 0.34,
+    cooldown: 0.95,
+    broadExtra: 11,
+    burstVen: true,
+  },
+};
+
 const ENEMY_BOLT_POOL = 56;
 /** Seconds before an uncollected grazing nibble winks out. */
 const NIBBLE_LIFETIME_SEC = 3.05;
@@ -159,10 +256,22 @@ function escapeHtml(str) {
     .replaceAll('"', "&quot;");
 }
 
+/** Highest score persists under this exact key per spec. */
+const SCORE_TO_BEAT_LS_KEY = "Score to beat";
+
+/** Overhead hull strips never exceed this fraction of viewport height (close chase cam guard). */
+const HUD_SPRITE_MAX_VIEWPORT_HEIGHT_FRAC = 1 / 6;
+
+const DEATH_RED_BUILD_S = 0.38;
+const DEATH_TITLE_HOLD_BEFORE_SCORE_S = 0.94;
+const DEATH_PHASE_SCORE_REVEAL_AFTER_S = DEATH_RED_BUILD_S + DEATH_TITLE_HOLD_BEFORE_SCORE_S;
+
 export class Game {
   constructor(canvas, trackUrl) {
     this.canvas = canvas;
     this.trackUrl = trackUrl;
+    /** World seed when `trackUrl === "procedural"`; drives deterministic layout vs `generateProceduralTrackRaw`. */
+    this._proceduralSeed = /** @type {number | null} */ (null);
 
     /** @type {Awaited<import("./trackLoader.js").loadTrack>} */
     this.track = null;
@@ -206,6 +315,22 @@ export class Game {
     this.venomMeleeCd = 0;
     this.pendingVenomBite = false;
 
+    /** Free forward fin strike — hold <kbd>F</kbd>, release with timing tiers. */
+    this.strikeKickCd = 0;
+    /** True while charging a fin kick until keyup resolves the swing. */
+    this.strikeKickCharging = false;
+    /** Seconds <kbd>F</kbd> held this charge. */
+    this.strikeChargeT = 0;
+    /** Key state for robust keyup/release pairing. */
+    this.finKickKeyHeld = false;
+    /** Hind-leg exaggeration envelope after kicking / charging brace. */
+    this.strikeKickPoseT = 0;
+    /** Matches last fin-kick tier pose duration (`poseRowKickMeshes` easing). */
+    this.strikeKickPoseMax = STRIKE_KICK.poseSeconds;
+
+    /** Last `time` argument to `update` (wake VFX chromaKick). */
+    this._kickHudTime = 0;
+
     this.foodMeshes = [];
     /** @type {THREE.Object3D[]} */
     this.disposeCleanup = [];
@@ -229,8 +354,13 @@ export class Game {
     /** Hot colour for predator wake lash when venom connects. */
     this._strikeHotTint = new THREE.Color(0xfff7ff);
 
-    /** Overhead hull strip sprite (canvas). */
-    this.playerHpHud = null;
+    /** Additive megakick chromatic burst (world space). */
+    this.megaKickChromGroup = null;
+    /** @type {THREE.MeshBasicMaterial[]} */
+    this.megaKickChromMats = [];
+    /** @type {THREE.Mesh[]} */
+    this.megaKickChromMeshes = [];
+    this.megaKickChromT = 0;
 
     /** Remaining hull-hit flash accent for hud/wobble. */
     this.playerDmgFlashT = 0;
@@ -258,13 +388,68 @@ export class Game {
     /** smoothed [0–1]: how vigorously hind legs animate / speed ripples */
     this._kickBlend = 0;
     this._rowPhaseLive = 0;
+
+    /** @type {THREE.DirectionalLight | null} */
+    this.sunLight = null;
+    this._waterSunScratch = new THREE.Vector3();
+
+    /** Procedural inward sky dome (see `skyDome.js`). */
+    this.pondSkyMesh = null;
+    /** @type {{ uTime?: { value: number } } | null} */
+    this.pondSkyUniforms = null;
+
+    /** @type {SurfaceWakePool | null} */
+    this.waterWakePool = null;
+    /** @type {THREE.ShaderMaterial | THREE.MeshStandardMaterial | null} */
+    this.waterMaterial = null;
+    this._wakeTrailPrev = new THREE.Vector3();
+    /** Leftover hull distance toward next swimmer wake spawn. */
+    this._wakeTrailCarry = 0;
+
+    /** Author hull height above flat water plane; ripple offset added each frame to match shader. */
+    this.playerFloatBaseY = 0.35;
+
+    /** Esc freezes sim; `_simFreezeTime` is refreshed from `main.js` while unpaused. */
+    this.paused = false;
+    /** Last running sim second from `THREE.Clock.getElapsedTime()` — updated by main loop whenever unpaused. */
+    this._simFreezeTime = 0;
+
+    /** Procedural floating reed clusters (see `pondReeds.js`). */
+    this.reedField = null;
+    this._reedPlayerStartXZ = new THREE.Vector2();
+
+    /** Seconds since `playerDead` — phases death vignette → title → summary. */
+    this._deathSeqTime = 0;
+    /** One-shot best-score bookkeeping for ended runs (death or victory). */
+    this._bestScoreSyncedThisRun = false;
+    /** @type {{ prevBest: number; newBest: boolean; pts: number } | null} */
+    this._bestScoreSyncResult = null;
+
+    this._spriteClampBox = new THREE.Box3();
+
+    /** @type {THREE.Vector3 | null} */
+    this._playerHpHudBaseScale = null;
+    /** @type {THREE.Vector3} */
+    this._spriteClampCenter = new THREE.Vector3();
   }
 
   async init() {
-    this.track = await loadTrack(this.trackUrl);
+    if (this.trackUrl === "procedural") {
+      const s =
+        typeof crypto !== "undefined" && crypto.getRandomValues
+          ? crypto.getRandomValues(new Uint32Array(1))[0] >>> 0
+          : (Date.now() ^ (Math.floor(Math.random() * 4294967295) >>> 0)) >>> 0;
+      this._proceduralSeed = s;
+      const raw = generateProceduralTrackRaw(s);
+      this.track = mergeTrackDefaults(raw);
+    } else {
+      this._proceduralSeed = null;
+      this.track = await loadTrack(this.trackUrl);
+    }
 
     const spawn = this.track.spawn;
     this.pos.set(spawn.position[0], spawn.position[1], spawn.position[2]);
+    this.playerFloatBaseY = spawn.position[1];
     this.yaw = THREE.MathUtils.degToRad(Number(spawn.yawDeg ?? 0));
     this.speed = 0;
     this.foodStacks = 0;
@@ -281,8 +466,18 @@ export class Game {
     this.venomMax = VENOM.cap;
     this.venomSurgeT = 0;
     this.playerDead = false;
+    this._deathSeqTime = 0;
+    this._bestScoreSyncedThisRun = false;
+    this._bestScoreSyncResult = null;
     this.venomMeleeCd = 0;
     this.pendingVenomBite = false;
+
+    this.strikeKickCd = 0;
+    this.strikeKickCharging = false;
+    this.strikeChargeT = 0;
+    this.finKickKeyHeld = false;
+    this.strikeKickPoseT = 0;
+    this.strikeKickPoseMax = STRIKE_KICK.poseSeconds;
 
     if (this.venomSpitCone || this.venomBurstMesh) this.clearVenomBiteFx();
 
@@ -300,6 +495,8 @@ export class Game {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     this.buildWorld();
+    this._wakeTrailPrev.copy(this.pos);
+    this._wakeTrailCarry = 0;
     window.addEventListener("resize", this.resize);
     window.addEventListener("keydown", this.boundKeyDown);
     window.addEventListener("keyup", this.boundKeyUp);
@@ -312,6 +509,10 @@ export class Game {
     if (this.scene) {
       this.releaseEnemyRangedBolts();
       this.clearPreyNibbles();
+      if (this.waterWakePool) {
+        this.waterWakePool.dispose();
+        this.waterWakePool = null;
+      }
     }
     while (this.scene && this.scene.children.length) {
       const obj = this.scene.children[0];
@@ -358,8 +559,36 @@ export class Game {
       e.preventDefault();
     }
     if (down && e.code === "KeyR") this.resetRace();
+    if (e.code === "Escape" && down && !e.repeat) {
+      if (!this.track) return;
+      this.paused = !this.paused;
+      if (this.paused) {
+        this.keys.thrust = false;
+        this.keys.reverse = false;
+        this.keys.left = false;
+        this.keys.right = false;
+        this.pendingVenomBite = false;
+        this.strikeKickCharging = false;
+        this.strikeChargeT = 0;
+        this.finKickKeyHeld = false;
+      }
+      e.preventDefault();
+    }
     if (e.code === "Space" && down && !e.repeat) {
       this.pendingVenomBite = true;
+      e.preventDefault();
+    }
+    if (e.code === "KeyF") {
+      if (down) {
+        this.finKickKeyHeld = true;
+        if (!e.repeat && this.track && !this.playerDead && !this.finished && this.strikeKickCd <= 0) {
+          this.strikeKickCharging = true;
+          this.strikeChargeT = 0;
+        }
+      } else {
+        this.finKickKeyHeld = false;
+        this.releaseFinKickCharge();
+      }
       e.preventDefault();
     }
   }
@@ -368,9 +597,11 @@ export class Game {
     if (!this.track) return;
     const s = this.track.spawn;
     this.pos.set(s.position[0], s.position[1], s.position[2]);
+    this.playerFloatBaseY = s.position[1];
     this.yaw = THREE.MathUtils.degToRad(Number(s.yawDeg ?? 0));
     this.speed = 0;
     this.foodStacks = 0;
+    this.paused = false;
     this.hitCooldown = 0;
     this.nextCp = 0;
     this.completedLaps = 0;
@@ -378,6 +609,9 @@ export class Game {
     this.points = 0;
     this.winReason = null;
     this.scoreFlags = { mealSweepBonus: false };
+    this._deathSeqTime = 0;
+    this._bestScoreSyncedThisRun = false;
+    this._bestScoreSyncResult = null;
     this._kickBlend = 0;
     this._rowPhaseLive = 0;
 
@@ -389,14 +623,26 @@ export class Game {
     this.playerDead = false;
     this.venomMeleeCd = 0;
     this.pendingVenomBite = false;
+
+    this.strikeKickCd = 0;
+    this.strikeKickCharging = false;
+    this.strikeChargeT = 0;
+    this.finKickKeyHeld = false;
+    this.strikeKickPoseT = 0;
+    this.strikeKickPoseMax = STRIKE_KICK.poseSeconds;
+    this.megaKickChromT = 0;
+    if (this.megaKickChromGroup) this.megaKickChromGroup.visible = false;
+
+    this._wakeTrailPrev.copy(this.pos);
+    this._wakeTrailCarry = 0;
+
     this.clearVenomBiteFx();
     this.playerDmgFlashT = 0;
     this._playerHudSnap = "";
     this.releaseEnemyRangedBolts();
     this.clearPreyNibbles();
-    this.clearPreyNibbles();
-
-    let i = 0;    for (const fd of this.track.food) {
+    let i = 0;
+    for (const fd of this.track.food) {
       fd.active = true;
       const m = this.foodMeshes[i];
       if (m) m.visible = true;
@@ -413,10 +659,17 @@ export class Game {
       grp.visible = true;
       const surfY = Math.max(Number(pd.position[1]), 0.38);
       grp.position.set(pd.position[0], surfY, pd.position[2]);
+      grp.userData._wakeLastX = pd.position[0];
+      grp.userData._wakeLastZ = pd.position[2];
       grp.userData.baseY = surfY;
       grp.rotation.set(0, 0, 0);
+      grp.userData._predKillScoreDone = false;
       grp.userData.dmgSquashT = 0;
       grp.userData._predHudSnap = "";
+
+      if (grp.userData._reedStartXZ) {
+        grp.userData._reedStartXZ.set(pd.position[0], pd.position[2]);
+      }
 
       const h = grp.userData.hpHud;
       if (h?.draw && live.hpMax > 0) {
@@ -429,6 +682,13 @@ export class Game {
   buildWorld() {
     const ambient = new THREE.HemisphereLight(0xffffff, 0x224466, 0.55);
     this.scene.add(ambient);
+
+    const pondSky = createPondSkyDome();
+    this.pondSkyMesh = pondSky.mesh;
+    this.pondSkyUniforms = pondSky.uniforms;
+    this.scene.add(pondSky.mesh);
+    this.disposeCleanup.push(pondSky.mesh);
+
     const sun = new THREE.DirectionalLight(0xfff3dd, 1.08);
     sun.position.set(-40, 90, -20);
     sun.castShadow = true;
@@ -438,25 +698,25 @@ export class Game {
     cam.far = 270;
     sun.shadow.mapSize.set(2048, 2048);
     this.scene.add(sun);
+    this.sunLight = sun;
 
-    const water = new THREE.Mesh(
-      new THREE.PlaneGeometry(520, 520),
-      new THREE.MeshStandardMaterial({
-        color: COLORS.water,
-        roughness: 0.42,
-        metalness: 0.06,
-        transparent: true,
-        opacity: 0.93,
-        emissive: new THREE.Color(COLORS.waterDeep),
-        emissiveIntensity: 0.15,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-      })
-    );
-    water.rotation.x = -Math.PI / 2;
-    water.receiveShadow = true;
-    this.scene.add(water);
-    this.disposeCleanup.push(water);
+    const wMaps = createTiledWaterMaps(COLORS.water, COLORS.lightWaterSheen);
+    const waterMat = createAnimatedWaterMaterial(wMaps, {
+      waterHex: COLORS.water,
+      deepHex: COLORS.waterDeep,
+      opacity: 0.94,
+    });
+    this.waterMaterial = waterMat;
+
+    const urlEntropy =
+      this.trackUrl === "procedural" && typeof this._proceduralSeed === "number"
+        ? (this._proceduralSeed >>> 0) ^ 0xe51babe
+        : this.trackUrl.split("").reduce((acc, ch) => acc + ch.charCodeAt(0), 7);
+    const reedSeed =
+      (urlEntropy ^
+        ((this.track.predators?.length ?? 0) * 1009) ^
+        ((this.track.lilies?.length ?? 0) * 131)) >>>
+      0;
 
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(520, 520),
@@ -468,9 +728,29 @@ export class Game {
     this.scene.add(floor);
     this.disposeCleanup.push(floor);
 
+    const stoneBed = createPondStoneBed(this.track, reedSeed ^ 0x5b076e7);
+    this.scene.add(stoneBed.root);
+    this.disposeCleanup.push(stoneBed.root);
+
+    const water = new THREE.Mesh(new THREE.PlaneGeometry(520, 520, 96, 96), waterMat);
+    water.rotation.x = -Math.PI / 2;
+    water.receiveShadow = true;
+    this.scene.add(water);
+    this.disposeCleanup.push(water);
+
+    if (this.waterWakePool) {
+      this.waterWakePool.dispose();
+      this.waterWakePool = null;
+    }
+    this.waterWakePool = new SurfaceWakePool(this.scene, 72);
+
+    this.reedField = createPondReedField(this.track, reedSeed);
+    this.scene.add(this.reedField.root);
+    this.disposeCleanup.push(this.reedField.root);
+
     const grid = new THREE.GridHelper(260, 52, 0x1fb2d5, 0x104d66);
-    grid.position.y = 0.01;
-    grid.material.opacity = 0.12;
+    grid.position.y = 0.008;
+    grid.material.opacity = 0.036;
     grid.material.transparent = true;
     this.scene.add(grid);
     this.disposeCleanup.push(grid);
@@ -536,6 +816,8 @@ export class Game {
       const x = rc.x ?? rc.position[0];
       const z = rc.z ?? rc.position[1];
       grp.position.set(x, rc.y ?? 0.35, z);
+      grp.userData._wakeLastX = x;
+      grp.userData._wakeLastZ = z;
       grp.userData.racerCfg = rc;
       this.scene.add(grp);
       this.disposeCleanup.push(grp);
@@ -556,6 +838,8 @@ export class Game {
       const surfY = Math.max(Number(pd.position[1]), 0.38);
       const grp = predatorMesh(pd.kind);
       grp.position.set(pd.position[0], surfY, pd.position[2]);
+      grp.userData._wakeLastX = pd.position[0];
+      grp.userData._wakeLastZ = pd.position[2];
       const vm = pd.visualMultiplier ?? 1;
       if (Math.abs(vm - 1) > 1e-4) grp.scale.multiplyScalar(vm);
       grp.userData.baseY = surfY;
@@ -571,6 +855,11 @@ export class Game {
       this.scene.add(grp);
       this.disposeCleanup.push(grp);
       this.predatorInst.push(grp);
+
+      const ph = grp.userData.hpHud;
+      if (ph?.sprite && !grp.userData._hpHudBaseScaleCopy) {
+        grp.userData._hpHudBaseScaleCopy = ph.sprite.scale.clone();
+      }
 
       const wakeMat = grp.userData.predWakeMat;
       if (wakeMat) {
@@ -588,6 +877,7 @@ export class Game {
     this.disposeCleanup.push(player);
 
     this.ensureVenomBiteMeshes(player);
+    this.ensureMegaKickChromBurst();
     this.ensurePlayerHpBar(player);
 
     this.ensureEnemyBoltPool();
@@ -599,6 +889,7 @@ export class Game {
     const h = createHpStripSprite(2.32, 0.5, 2.74);
     this.playerHpHud = h;
     player.add(h.sprite);
+    this._playerHpHudBaseScale = h.sprite.scale.clone();
   }
 
   /** Repaints strip when vitality or hull-hit flash envelope changes. */
@@ -673,11 +964,14 @@ export class Game {
   clearVenomBiteFx() {
     this.venomStrikeFxT = 0;
     this.venomBurstT = 0;
+    this.megaKickChromT = 0;
+    if (this.megaKickChromGroup) this.megaKickChromGroup.visible = false;
     if (this.venomSpitCone) this.venomSpitCone.visible = false;
     if (this.venomSpitMat) this.venomSpitMat.opacity = 0;
     if (this.venomBurstMesh) this.venomBurstMesh.visible = false;
     if (this.venomBurstMat) this.venomBurstMat.opacity = 0;
     this.syncVenomBiteVisuals();
+    this.syncMegaKickChromBurstVisuals();
   }
 
   /** Decay saliva/burst timers, then repaint meshes so VFX survives the rest of `update`. */
@@ -685,8 +979,11 @@ export class Game {
     if (dt > 0) {
       if (this.venomStrikeFxT > 0) this.venomStrikeFxT = Math.max(0, this.venomStrikeFxT - dt);
       if (this.venomBurstT > 0) this.venomBurstT = Math.max(0, this.venomBurstT - dt);
+      if (this.strikeKickPoseT > 0) this.strikeKickPoseT = Math.max(0, this.strikeKickPoseT - dt);
+      if (this.megaKickChromT > 0) this.megaKickChromT = Math.max(0, this.megaKickChromT - dt);
     }
     this.syncVenomBiteVisuals();
+    this.syncMegaKickChromBurstVisuals();
   }
 
   /** Paint saliva jet + grazing burst from timers (runs after timers are armed mid-frame too). */
@@ -764,6 +1061,9 @@ export class Game {
     if (this.health <= 0) {
       this.health = 0;
       this.playerDead = true;
+      this._deathSeqTime = 0;
+      this._bestScoreSyncedThisRun = false;
+      this._bestScoreSyncResult = null;
       this.speed *= 0.22;
       this.winReason = null;
     }
@@ -965,10 +1265,10 @@ export class Game {
   }
 
   /**
-   * Aim weak-spots into the saliva cone relative to probe origin — returns `{ dist, vulnMul }`.
+   * Aim weak-spots into a forward wedge from probe origin — returns `{ dist, vulnMul }`.
    * @returns {{ dist: number; vulnMul: number } | null}
    */
-  predatorWeakVenemShot(grp, pd, biteX, biteZ, fwdSn, fwdCs) {
+  predatorDirectedWeakShot(grp, pd, biteX, biteZ, fwdSn, fwdCs, maxRange, cosHalfFan) {
     const weak = pd.weakSpots;
     if (!Array.isArray(weak) || weak.length === 0) return null;
     let bestD = Infinity;
@@ -990,10 +1290,10 @@ export class Game {
         typeof spot.radius === "number" && Number.isFinite(spot.radius) ? spot.radius : 0.45;
       const sx = grp.scale.x || 1;
       const worldSpotR = sR * sx;
-      if (dist > VENOM_BITE_RANGE + worldSpotR) continue;
+      if (dist > maxRange + worldSpotR) continue;
 
       const dot = (edx / dist) * fwdSn + (edz / dist) * fwdCs;
-      if (dot < VENOM_BITE_COS_HALF_FAN) continue;
+      if (cosHalfFan > -1.001 && dot < cosHalfFan) continue;
 
       const vmRaw = spot.venomVulnerability;
       const vulnMul =
@@ -1001,7 +1301,7 @@ export class Game {
           ? THREE.MathUtils.clamp(vmRaw, 0.06, 3.95)
           : 1;
 
-      const penalized = THREE.MathUtils.clamp(dist - worldSpotR * 0.22, dist * 0.55, VENOM_BITE_RANGE);
+      const penalized = THREE.MathUtils.clamp(dist - worldSpotR * 0.22, dist * 0.55, maxRange);
 
       if (penalized < bestD) {
         bestD = penalized;
@@ -1011,6 +1311,23 @@ export class Game {
 
     if (!Number.isFinite(bestD) || bestD === Infinity) return null;
     return { dist: bestD, vulnMul: bestVm };
+  }
+
+  /**
+   * Saliva wedge variant of weak-spot probe.
+   * @returns {{ dist: number; vulnMul: number } | null}
+   */
+  predatorWeakVenemShot(grp, pd, biteX, biteZ, fwdSn, fwdCs) {
+    return this.predatorDirectedWeakShot(
+      grp,
+      pd,
+      biteX,
+      biteZ,
+      fwdSn,
+      fwdCs,
+      VENOM_BITE_RANGE,
+      VENOM_BITE_COS_HALF_FAN
+    );
   }
 
   tryEnemyRangedFire(predGrp, pd, live, dt, playerX, playerZ) {
@@ -1156,10 +1473,11 @@ export class Game {
       if (live.hpNow <= 0) {
         live.hpNow = 0;
         grp.visible = false;
+        this.registerPredatorKillScore(grp, pd);
       }
     }
 
-    if (hitPredators.length > 0 && this.venomBurstMesh) {
+    if (hitPredators.length > 0 && this.venomBurstMesh && this.venomBurstMat) {
       this._venomBurstCentroid.set(0, 0, 0);
       for (const g of hitPredators) {
         this._venomBurstCentroid.x += g.position.x;
@@ -1174,10 +1492,309 @@ export class Game {
       this._venomBurstCentroid.multiplyScalar(inv);
       this._venomBurstCentroid.y += 0.1;
       this.venomBurstMesh.position.copy(this._venomBurstCentroid);
+      this.venomBurstMat.color.setHex(0xd9bfff);
       this.venomBurstT = Math.max(this.venomBurstT, VENOM_HIT_BURST_SECONDS);
     }
 
     this.syncVenomBiteVisuals();
+  }
+
+  classifyFinKickChargeTier(t) {
+    if (t <= FIN_KICK_CHARGE.tapMax) return "tap";
+    if (t < FIN_KICK_CHARGE.partialMax) return "partial";
+    if (t >= FIN_KICK_CHARGE.megaMin && t <= FIN_KICK_CHARGE.megaMax) return "mega";
+    if (t >= FIN_KICK_CHARGE.overholdMin) return "overhold";
+    return "tired";
+  }
+
+  /** @param {THREE.Object3D[]} hitPredators */
+  strikeKickVenBurstAtPrey(hitPredators, colorHex) {
+    if (hitPredators.length === 0 || !this.venomBurstMesh || !this.venomBurstMat) return;
+    this._venomBurstCentroid.set(0, 0, 0);
+    for (const g of hitPredators) {
+      this._venomBurstCentroid.x += g.position.x;
+      this._venomBurstCentroid.y += g.position.y;
+      this._venomBurstCentroid.z += g.position.z;
+
+      const prev = typeof g.userData.venomHitFlashT === "number" ? g.userData.venomHitFlashT : 0;
+      g.userData.venomHitFlashT = Math.max(prev, 0.32);
+      g.userData.venWakeDirty = true;
+    }
+    const inv = 1 / hitPredators.length;
+    this._venomBurstCentroid.multiplyScalar(inv);
+    this._venomBurstCentroid.y += 0.1;
+    this.venomBurstMesh.position.copy(this._venomBurstCentroid);
+    this.venomBurstMat.color.setHex(colorHex);
+    this.venomBurstT = Math.max(this.venomBurstT, VENOM_HIT_BURST_SECONDS);
+  }
+
+  /**
+   * @param {number} kickX
+   * @param {number} kickZ
+   * @param {number} fwdSn
+   * @param {number} fwdCs
+   * @param {(typeof FIN_KICK_SPECS)["tap"]} spec
+   */
+  applyFinKickWave(kickX, kickZ, fwdSn, fwdCs, spec) {
+    const reachSq = spec.range * spec.range;
+    const broadSq = (spec.range + spec.broadExtra) ** 2;
+
+    /** @type {THREE.Object3D[]} */
+    const hitPredators = [];
+
+    for (const grp of this.predatorInst) {
+      const live = grp.userData.live;
+      const pd = grp.userData.predCfg;
+      if (!live || !pd || live.hpNow <= 0) continue;
+
+      const tcx = grp.position.x - kickX;
+      const tcz = grp.position.z - kickZ;
+      if (tcx * tcx + tcz * tcz > broadSq) continue;
+
+      const hasWeak = Array.isArray(pd.weakSpots) && pd.weakSpots.length > 0;
+      let dist;
+      let vulnVen = 1;
+      if (!hasWeak) {
+        const dsq = tcx * tcx + tcz * tcz;
+        if (dsq > reachSq || dsq < 1e-9) continue;
+        dist = Math.sqrt(dsq);
+        const dot = (tcx / dist) * fwdSn + (tcz / dist) * fwdCs;
+        if (dot < spec.cosHalfFan) continue;
+      } else {
+        const ws = this.predatorDirectedWeakShot(
+          grp,
+          pd,
+          kickX,
+          kickZ,
+          fwdSn,
+          fwdCs,
+          spec.range,
+          spec.cosHalfFan
+        );
+        if (!ws) continue;
+        dist = ws.dist;
+        vulnVen = ws.vulnMul;
+      }
+
+      const sus =
+        typeof pd.venomSusceptibility === "number" && Number.isFinite(pd.venomSusceptibility)
+          ? pd.venomSusceptibility
+          : 1;
+
+      const distFrac = THREE.MathUtils.clamp(dist / Math.max(spec.range, 1e-5), 0, 1);
+      const distMult = THREE.MathUtils.lerp(
+        KICK_NEAR_DMG_MULT,
+        KICK_FAR_DMG_MULT,
+        THREE.MathUtils.smoothstep(distFrac, 0.035, 0.995)
+      );
+      const chip = KICK_STRIKE_PREY_KILL * spec.chipMul * sus * distMult * vulnVen;
+      if (chip <= 1e-6) continue;
+
+      hitPredators.push(grp);
+
+      const hpWas = live.hpNow;
+      live.hpNow -= chip;
+      if (hpWas > live.hpNow) {
+        grp.userData.dmgSquashT = Math.max(
+          grp.userData.dmgSquashT ?? 0,
+          0.22 + THREE.MathUtils.clamp(distMult * vulnVen, 0, 4) * 0.42
+        );
+        grp.userData._predHudSnap = "";
+
+        const nibHeal = THREE.MathUtils.clamp(
+          NIBBLE_HEAL_BASE + chip * NIBBLE_HEAL_PER_CHIP,
+          3.85,
+          NIBBLE_HEAL_MAX
+        );
+        const jx = (Math.random() - 0.5) * 1.25;
+        const jz = (Math.random() - 0.5) * 1.25;
+        const sy = grp.userData.baseY ?? grp.position.y;
+        this.spawnPreyNibble(grp.position.x + jx, sy + 0.14, grp.position.z + jz, nibHeal);
+      }
+      if (live.hpNow <= 0) {
+        live.hpNow = 0;
+        grp.visible = false;
+        this.registerPredatorKillScore(grp, pd);
+      }
+    }
+
+    return hitPredators;
+  }
+
+  releaseFinKickCharge() {
+    if (!this.strikeKickCharging) return;
+    this.strikeKickCharging = false;
+    const held = this.strikeChargeT;
+    this.strikeChargeT = 0;
+
+    if (!this.track || this.playerDead || this.finished) return;
+    if (this.strikeKickCd > 0) return;
+
+    const sn = Math.sin(this.yaw);
+    const cs = Math.cos(this.yaw);
+    const steerRev = this.speed < -0.05;
+    const fwdSn = steerRev ? -sn : sn;
+    const fwdCs = steerRev ? -cs : cs;
+
+    const kickX = this.pos.x + fwdSn * KICK_STRIKE_FORWARD_INSET;
+    const kickZ = this.pos.z + fwdCs * KICK_STRIKE_FORWARD_INSET;
+
+    const tier = this.classifyFinKickChargeTier(held);
+    const spec = FIN_KICK_SPECS[tier];
+
+    if (tier === "overhold") {
+      this.applyParasiteBleed(FIN_KICK_CHARGE.selfHarm);
+      this.playerDmgFlashT = Math.max(this.playerDmgFlashT, 0.62);
+    }
+
+    this.strikeKickCd = spec.cooldown;
+    this.strikeKickPoseT = spec.poseSeconds;
+    this.strikeKickPoseMax = spec.poseSeconds;
+
+    this.pos.x += fwdSn * spec.forwardSurge;
+    this.pos.z += fwdCs * spec.forwardSurge;
+
+    const hitPredators = this.applyFinKickWave(kickX, kickZ, fwdSn, fwdCs, spec);
+
+    if (tier === "mega") this.armMegaKickChromBurst(kickX, kickZ);
+    else if (hitPredators.length > 0 && spec.burstVen) {
+      const hx = tier === "overhold" ? 0xff6eb4 : tier === "tired" ? 0xfff0c4 : 0xdcfaff;
+      this.strikeKickVenBurstAtPrey(hitPredators, hx >>> 0);
+    }
+
+    this.syncVenomBiteVisuals();
+  }
+
+  ensureMegaKickChromBurst() {
+    if (this.megaKickChromGroup || !this.scene) return;
+
+    const root = new THREE.Group();
+    root.name = "megaKickChrom";
+    root.visible = false;
+    /** @type {THREE.MeshBasicMaterial[]} */
+    const mats = [];
+    /** @type {THREE.Mesh[]} */
+    const meshes = [];
+
+    const coreGeom = new THREE.IcosahedronGeometry(1.12, 1);
+    const coreMat = new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      fog: false,
+    });
+    const core = new THREE.Mesh(coreGeom, coreMat);
+    core.frustumCulled = false;
+    core.renderOrder = 11;
+    root.add(core);
+    mats.push(coreMat);
+    meshes.push(core);
+
+    const ringDims = [
+      [0.86, 0.94],
+      [1.06, 1.18],
+      [1.32, 1.48],
+      [1.64, 1.86],
+      [2.04, 2.34],
+    ];
+    let rHue = 0.02;
+    for (const [ri, ro] of ringDims) {
+      const rg = new THREE.RingGeometry(ri * 0.5, ro * 0.5, 44, 1);
+      const mat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color().setHSL(rHue, 1, 0.58),
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        fog: false,
+      });
+      const m = new THREE.Mesh(rg, mat);
+      m.rotation.x = -Math.PI / 2;
+      m.frustumCulled = false;
+      m.renderOrder = 10;
+      root.add(m);
+      mats.push(mat);
+      meshes.push(m);
+      rHue += 0.17;
+    }
+
+    for (let i = 0; i < 8; i += 1) {
+      const sg = new THREE.SphereGeometry(0.42, 10, 8);
+      const mat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color().setHSL((i / 8) % 1, 1, 0.63),
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        fog: false,
+      });
+      const m = new THREE.Mesh(sg, mat);
+      const ang = (i / 8) * Math.PI * 2;
+      m.position.set(Math.cos(ang) * 2.35, 0.28 + (i % 3) * 0.18, Math.sin(ang) * 2.35);
+      m.frustumCulled = false;
+      m.renderOrder = 10;
+      root.add(m);
+      mats.push(mat);
+      meshes.push(m);
+    }
+
+    this.scene.add(root);
+    this.disposeCleanup.push(root);
+    this.megaKickChromGroup = root;
+    this.megaKickChromMats = mats;
+    this.megaKickChromMeshes = meshes;
+  }
+
+  armMegaKickChromBurst(wx, wz) {
+    this.ensureMegaKickChromBurst();
+    if (!this.megaKickChromGroup) return;
+    this.megaKickChromGroup.position.set(wx, 0.55, wz);
+    this.megaKickChromT = FIN_KICK_CHARGE.megaChromSeconds;
+    this.syncMegaKickChromBurstVisuals();
+  }
+
+  syncMegaKickChromBurstVisuals() {
+    const g = this.megaKickChromGroup;
+    const meshes = this.megaKickChromMeshes;
+    const mats = this.megaKickChromMats;
+    if (!g || !meshes?.length || !mats?.length) return;
+
+    const maxT = FIN_KICK_CHARGE.megaChromSeconds;
+    if (this.megaKickChromT <= 0 || !Number.isFinite(this.megaKickChromT)) {
+      g.visible = false;
+      return;
+    }
+
+    const elapsed = maxT - this.megaKickChromT;
+    const phase = THREE.MathUtils.clamp(elapsed / Math.max(maxT, 1e-5), 0, 1);
+    const swell = Math.sin(phase * Math.PI);
+    if (swell < 0.025) {
+      g.visible = false;
+      return;
+    }
+
+    g.visible = true;
+    const hueT = this._kickHudTime;
+
+    const core = meshes[0];
+    mats[0].color.setHSL((hueT * 1.75 + phase * 0.4) % 1, 1, 0.59);
+    mats[0].opacity = swell * 0.92;
+    core.scale.setScalar(THREE.MathUtils.lerp(0.55, 10.5, phase));
+
+    for (let i = 1; i <= 5; i += 1) {
+      const mat = mats[i];
+      mat.color.setHSL((hueT * 2.35 + i * 0.11 + phase * 0.55) % 1, 1, 0.56);
+      mat.opacity = swell * THREE.MathUtils.lerp(0.52, 0.06, phase) * 0.74;
+      meshes[i].scale.setScalar(THREE.MathUtils.lerp(0.8, 4.95 + i * 0.45, phase));
+    }
+
+    for (let i = 6; i < meshes.length; i += 1) {
+      mats[i].color.setHSL((hueT * 3.05 + i * 0.07 + phase) % 1, 1, 0.62);
+      mats[i].opacity = swell * 0.58 * (1 - phase * 0.38);
+      meshes[i].scale.setScalar(THREE.MathUtils.lerp(0.32, 2.55, swell));
+    }
   }
 
   syncRowKickDynamics(time, propulseFwd, propulseRev, dt, speedCeilingFwd) {
@@ -1228,7 +1845,25 @@ export class Game {
     const phase = this._rowPhaseLive + (this.speed < -0.06 ? Math.PI : 0);
     const stroke = /** @type {any} */ (this.playerMesh?.userData?.stroke);
 
-    const relax = this.finished || this.playerDead || this._kickBlend < 0.015;
+    const crippled = this.finished || this.playerDead;
+    const poseDur = Math.max(this.strikeKickPoseMax, 1e-4);
+    const poseMega =
+      !crippled && this.strikeKickPoseT > 0
+        ? Math.sin(THREE.MathUtils.clamp(this.strikeKickPoseT / poseDur, 0, 1) * Math.PI)
+        : 0;
+    const chargeBrace =
+      !crippled && this.strikeKickCharging
+        ? THREE.MathUtils.smoothstep(
+            THREE.MathUtils.clamp(this.strikeChargeT / Math.max(FIN_KICK_CHARGE.megaMax, 1e-5), 0, 1),
+            0.08,
+            1
+          ) * 0.64
+        : 0;
+    const megaKickAmp = Math.max(poseMega, chargeBrace);
+    /** Still row / pose legs during a scripted fin slam even when drifting nearly still. */
+    const relax =
+      crippled ||
+      (!crippled && this._kickBlend < 0.015 && !(megaKickAmp > 2e-4));
 
     if (relax) {
       if (stroke?.hindLPivot && stroke?.hindRPivot) {
@@ -1287,6 +1922,13 @@ export class Game {
 
       stroke.hindLPivot.rotation.z = -0.04 * b * powL * Math.sin(phase * 2);
       stroke.hindRPivot.rotation.z = -0.04 * b * powR * Math.sin((phase + Math.PI) * 2);
+
+      if (megaKickAmp > 0.02) {
+        stroke.hindLPivot.rotation.y -= megaKickAmp * 2.08;
+        stroke.hindRPivot.rotation.y += megaKickAmp * 2.08;
+        stroke.hindLPivot.rotation.x += megaKickAmp * 0.98;
+        stroke.hindRPivot.rotation.x += megaKickAmp * 0.98;
+      }
     }
 
     if (stroke?.foreGroup) stroke.foreGroup.rotation.z = Math.sin(phase * 1.92) * 0.065 * this._kickBlend;
@@ -1296,8 +1938,11 @@ export class Game {
     if (this.playerMesh) {
       const kk = combinedKickDrive(phase);
       const b = this._kickBlend;
-      this.playerMesh.rotation.x = -b * kk * 0.041;
-      this.playerMesh.rotation.z = b * kk * Math.sin(phase * 2) * 0.022;
+      let px = -b * kk * 0.041;
+      const pz = b * kk * Math.sin(phase * 2) * 0.022;
+      if (megaKickAmp > 0.002) px -= megaKickAmp * 0.26;
+      this.playerMesh.rotation.x = px;
+      this.playerMesh.rotation.z = pz;
     }
   }
 
@@ -1308,17 +1953,167 @@ export class Game {
     return dx * dx + dz * dz < rr * rr;
   }
 
+  syncWaterUniforms(time) {
+    if (this.pondSkyUniforms?.uTime) this.pondSkyUniforms.uTime.value = time;
+    const m = this.waterMaterial;
+    if (!m?.userData?.isWaterShader || !this.scene) return;
+    const u = /** @type {THREE.ShaderMaterial} */ (m).uniforms;
+    u.uTime.value = time;
+    if (this.sunLight) {
+      this.sunLight.getWorldDirection(this._waterSunScratch);
+      // negate: Lambert uses dir from surface toward the sun (−photon-travel).
+
+
+      this._waterSunScratch.negate();
+      u.uSunDir.value.copy(this._waterSunScratch);
+    }
+    const fog = this.scene.fog;
+    if (fog && /** @type {THREE.Fog} */ (fog).isFog) {
+      /** @type {THREE.Fog} */
+      const f = fog;
+      u.uFogNear.value = f.near;
+      u.uFogFar.value = f.far;
+      u.uFogColor.value.set(f.color.r, f.color.g, f.color.b);
+    }
+  }
+
+  advanceWaterTextureScroll(dt) {
+    if (!this.waterMaterial || dt <= 0) return;
+    if (this.waterMaterial.userData?.isWaterShader) {
+      const off = /** @type {THREE.ShaderMaterial} */ (this.waterMaterial).uniforms.uMapOffset.value;
+      off.x += dt * 0.023;
+      off.y -= dt * 0.034;
+      return;
+    }
+    const m = /** @type {THREE.MeshStandardMaterial} */ (this.waterMaterial);
+    if (!m.map) return;
+    m.map.offset.x += dt * 0.023;
+    m.map.offset.y -= dt * 0.034;
+    if (m.bumpMap) {
+      m.bumpMap.offset.copy(m.map.offset);
+    }
+  }
+
+  /** Additive wakes left on the pond while grazers row or chase */
+  spawnSurfaceWakeTrails(dt) {
+    const pool = this.waterWakePool;
+    if (!pool || !this.track || dt <= 0) return;
+
+    const swimmerMoves = !this.playerDead && !this.finished;
+    let dsp = Math.hypot(this.pos.x - this._wakeTrailPrev.x, this.pos.z - this._wakeTrailPrev.z);
+
+    let acc = this._wakeTrailCarry;
+    if (swimmerMoves && dsp > 1e-7) acc += dsp;
+    if (swimmerMoves) {
+      const spdAbs = Math.abs(this.speed);
+      const stepSw = THREE.MathUtils.lerp(2.06, 0.22, THREE.MathUtils.clamp(spdAbs / 14.8, 0, 1));
+      let sx = this._wakeTrailPrev.x;
+      let sz = this._wakeTrailPrev.z;
+      const ux = dsp > 1e-7 ? (this.pos.x - sx) / dsp : 0;
+      const uz = dsp > 1e-7 ? (this.pos.z - sz) / dsp : 0;
+      let capRuns = 0;
+      while (acc >= stepSw && capRuns < 10) {
+        sx += ux * stepSw;
+        sz += uz * stepSw;
+        const str = THREE.MathUtils.lerp(1.78, 0.54, THREE.MathUtils.clamp(1 - spdAbs / 17.8, 0, 1));
+        pool.spawn(sx, sz, { strength: str * 0.82, color: 0xb0edff, wakeJitter: 0.55 });
+        acc -= stepSw;
+        capRuns += 1;
+      }
+    } else acc = 0;
+
+    if (swimmerMoves) this._wakeTrailPrev.copy(this.pos);
+    else {
+      acc = 0;
+      this._wakeTrailPrev.copy(this.pos);
+    }
+    this._wakeTrailCarry = acc;
+
+    for (const grp of this.predatorInst) {
+      const live = grp.userData.live;
+      const pd = grp.userData.predCfg;
+      if (!live || !pd || live.hpNow <= 0 || !grp.visible) continue;
+
+      const lx =
+        typeof grp.userData._wakeLastX === "number" ? grp.userData._wakeLastX : grp.position.x;
+      const lz =
+        typeof grp.userData._wakeLastZ === "number" ? grp.userData._wakeLastZ : grp.position.z;
+      grp.userData._wakeLastX = grp.position.x;
+      grp.userData._wakeLastZ = grp.position.z;
+
+      grp.userData._wakeRippleCd = Math.max(0, (grp.userData._wakeRippleCd ?? 0) - dt);
+
+      const dPred = Math.hypot(grp.position.x - lx, grp.position.z - lz);
+      if (dPred >= 0.068 && grp.userData._wakeRippleCd <= 0) {
+        let strP = pd.kind === "waterscorpion_tank" ? 0.52 : pd.kind === "hydra_pod" ? 0.44 : 0.36;
+        if (pd.kind === "mosquito_larva") strP = 0.34;
+        pool.spawn(grp.position.x, grp.position.z, {
+          strength: strP,
+          color: 0xffd8b0,
+          wakeJitter: 0.62,
+        });
+        grp.userData._wakeRippleCd = 0.38 + Math.random() * 0.16;
+      }
+    }
+
+    if (!this.finished) {
+      for (const grp of this.racerInst) {
+        const lx =
+          typeof grp.userData._wakeLastX === "number" ? grp.userData._wakeLastX : grp.position.x;
+        const lz =
+          typeof grp.userData._wakeLastZ === "number" ? grp.userData._wakeLastZ : grp.position.z;
+        grp.userData._wakeLastX = grp.position.x;
+        grp.userData._wakeLastZ = grp.position.z;
+        grp.userData._wakeRippleCd = Math.max(0, (grp.userData._wakeRippleCd ?? 0) - dt);
+
+        const dR = Math.hypot(grp.position.x - lx, grp.position.z - lz);
+        if (dR >= 0.078 && grp.userData._wakeRippleCd <= 0) {
+          pool.spawn(grp.position.x, grp.position.z, {
+            strength: 0.48,
+            color: 0xd0f8ff,
+            wakeJitter: 0.58,
+          });
+          grp.userData._wakeRippleCd = 0.31 + Math.random() * 0.14;
+        }
+      }
+    }
+  }
+
   update(dt, time) {
-    if (!this.track || dt <= 0) return;
+    if (!this.track) return;
+
+    if (this.paused) {
+      this.strikeKickCharging = false;
+      this.strikeChargeT = 0;
+      this.syncWaterUniforms(time);
+      this.clampOverheadHudSpriteHeights();
+      this.refreshPlayerHudStrip();
+      updatePondReeds(this.reedField, 0, time, [], this.pos.x, this.pos.z);
+      return;
+    }
+
+    if (dt <= 0) return;
+    if (this.playerDead) {
+      this._deathSeqTime += dt;
+    }
+
+    this._kickHudTime = time;
     if (this.hitCooldown > 0) this.hitCooldown -= dt;
 
     this.advanceVenomBiteTimers(dt);
+
+    this.syncWaterUniforms(time);
+
+    if (this.strikeKickCharging && !this.playerDead && !this.finished && this.strikeKickCd <= 0) {
+      this.strikeChargeT += dt;
+    }
 
     if (dt > 0 && this.playerDmgFlashT > 0) {
       this.playerDmgFlashT = Math.max(0, this.playerDmgFlashT - dt);
     }
 
     if (this.venomMeleeCd > 0) this.venomMeleeCd -= dt;
+    if (this.strikeKickCd > 0) this.strikeKickCd -= dt;
     if (this.venomSurgeT > 0) this.venomSurgeT -= dt;
     if (!this.playerDead && !this.finished) {
       const surgeMult = this.venomSurgeT > 0 ? VENOM_SURGE_MULT : 1;
@@ -1399,29 +2194,32 @@ export class Game {
     const sn = Math.sin(this.yaw);
     const cs = Math.cos(this.yaw);
 
+    this._reedPlayerStartXZ.set(this.pos.x, this.pos.z);
+    for (const grp of this.racerInst) {
+      let rv = grp.userData._reedStartXZ;
+      if (!rv) {
+        rv = new THREE.Vector2();
+        grp.userData._reedStartXZ = rv;
+      }
+      rv.set(grp.position.x, grp.position.z);
+    }
+    for (const grp of this.predatorInst) {
+      const pdc = grp.userData.predCfg;
+      const livec = grp.userData.live;
+      if (!pdc || !livec || livec.hpNow <= 0) continue;
+      let pv = grp.userData._reedStartXZ;
+      if (!pv) {
+        pv = new THREE.Vector2();
+        grp.userData._reedStartXZ = pv;
+      }
+      pv.set(grp.position.x, grp.position.z);
+    }
+
     const rowBoost = this.syncRowKickDynamics(time, thrust, reverse, dt, speedCeiling);
     this.pos.x += sn * this.speed * rowBoost * dt;
     this.pos.z += cs * this.speed * rowBoost * dt;
-
-    this.playerMesh.position.copy(this.pos);
-    this.playerMesh.rotation.y = this.yaw;
-    this.poseRowKickMeshes();
-
-    if (this.playerMesh && this.playerDmgFlashT > 0) {
-      const kk = THREE.MathUtils.clamp(this.playerDmgFlashT / 0.52, 0, 1);
-      this.playerMesh.rotation.z += Math.sin(time * 138) * 0.086 * kk;
-    }
-
-    const forward = this.camScratch.set(sn, 0, cs);
-
-    const lookPt = new THREE.Vector3(
-      this.pos.x + forward.x * 3.2,
-      this.pos.y + 0.9,
-      this.pos.z + forward.z * 3.2
-    );
-    const camWish = new THREE.Vector3(this.pos.x - forward.x * 11.8, this.pos.y + 10.2, this.pos.z - forward.z * 11.8);
-    this.camera.position.lerp(camWish, 1 - Math.exp(-3.85 * dt));
-    this.camera.lookAt(lookPt);
+    this.pos.y =
+      this.playerFloatBaseY + waterSurfaceDisplacementY(this.pos.x, this.pos.z, time);
 
     const hard = () => this.applyHardImpact();
     for (const l of this.track.lilies) {
@@ -1440,7 +2238,8 @@ export class Game {
     for (const grp of this.racerInst) {
       const rcfg = grp.userData.racerCfg;
       advanceRival(grp, rcfg, dt);
-      grp.position.y = rcfg.y ?? 0.35;
+      grp.position.y =
+        (rcfg.y ?? 0.35) + waterSurfaceDisplacementY(grp.position.x, grp.position.z, time);
       const bodyR = 1.06;
       if (this.collideDisk(this.pos.x, this.pos.z, grp.position.x, grp.position.z, PLAYER_RADIUS, bodyR)) hard();
     }
@@ -1482,7 +2281,7 @@ export class Game {
       );
 
       const baseY = grp.userData.baseY ?? pd.position[1];
-      grp.position.y = baseY + Math.sin(time * 16.4 + idle) * 0.038;
+      grp.position.y = baseY + waterSurfaceDisplacementY(grp.position.x, grp.position.z, time);
 
       const hud = grp.userData.hpHud;
       if (hud?.draw && live.hpMax > 0.001) {
@@ -1594,6 +2393,79 @@ export class Game {
 
     this.consumeVenomStrikeAttempt();
 
+    this.playerMesh.position.copy(this.pos);
+    this.playerMesh.rotation.y = this.yaw;
+    this.poseRowKickMeshes();
+
+    if (this.playerMesh && this.playerDmgFlashT > 0) {
+      const kk = THREE.MathUtils.clamp(this.playerDmgFlashT / 0.52, 0, 1);
+      this.playerMesh.rotation.z += Math.sin(time * 138) * 0.086 * kk;
+    }
+
+    const forward = this.camScratch.set(sn, 0, cs);
+    const lookPt = new THREE.Vector3(
+      this.pos.x + forward.x * 3.2,
+      this.pos.y + 0.9,
+      this.pos.z + forward.z * 3.2
+    );
+    const camWish = new THREE.Vector3(this.pos.x - forward.x * 11.8, this.pos.y + 10.2, this.pos.z - forward.z * 11.8);
+    this.camera.position.lerp(camWish, 1 - Math.exp(-3.85 * dt));
+    this.camera.lookAt(lookPt);
+
+    this.advanceWaterTextureScroll(dt);
+    this.spawnSurfaceWakeTrails(dt);
+    if (this.waterWakePool) this.waterWakePool.update(dt);
+
+    const invDt = 1 / dt;
+    /** @type {import("./pondReeds.js").ReedMover[]} */
+    const reedMovers = [];
+    const rpvx = (this.pos.x - this._reedPlayerStartXZ.x) * invDt;
+    const rpvz = (this.pos.z - this._reedPlayerStartXZ.z) * invDt;
+    const rpsp = Math.hypot(rpvx, rpvz);
+    if (rpsp > 0.035) {
+      reedMovers.push({
+        x: this.pos.x,
+        z: this.pos.z,
+        vx: rpvx,
+        vz: rpvz,
+        str: 1.05 + Math.min(rpsp / 8.5, 1.12),
+      });
+    }
+    for (const grp of this.racerInst) {
+      const rst = grp.userData._reedStartXZ;
+      if (!rst) continue;
+      const rvx = (grp.position.x - rst.x) * invDt;
+      const rvz = (grp.position.z - rst.y) * invDt;
+      const rsp = Math.hypot(rvx, rvz);
+      if (rsp < 0.055) continue;
+      reedMovers.push({
+        x: grp.position.x,
+        z: grp.position.z,
+        vx: rvx,
+        vz: rvz,
+        str: 0.7 + Math.min(rsp / 10, 0.58),
+      });
+    }
+    for (const grp of this.predatorInst) {
+      const liveR = grp.userData.live;
+      if (!liveR || liveR.hpNow <= 0) continue;
+      const pst = grp.userData._reedStartXZ;
+      if (!pst) continue;
+      const pvx = (grp.position.x - pst.x) * invDt;
+      const pvz = (grp.position.z - pst.y) * invDt;
+      const psp = Math.hypot(pvx, pvz);
+      if (psp < 0.045) continue;
+      reedMovers.push({
+        x: grp.position.x,
+        z: grp.position.z,
+        vx: pvx,
+        vz: pvz,
+        str: 0.65 + Math.min(psp / 9, 0.82),
+      });
+    }
+    updatePondReeds(this.reedField, dt, time, reedMovers, this.pos.x, this.pos.z);
+
+    this.clampOverheadHudSpriteHeights();
     this.refreshPlayerHudStrip();
 
     this.updateCourseVisuals(dt, time);
@@ -1697,33 +2569,173 @@ export class Game {
     }
   }
 
+  readStoredBestScore() {
+    try {
+      const raw = localStorage.getItem(SCORE_TO_BEAT_LS_KEY);
+      if (raw === null || raw === "") return 0;
+      const n = Number(raw);
+      return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Compares once per ended run (`playerDead` or `finished`): updates localStorage if this run surpasses stored best.
+   * @returns {{ prevBest: number; newBest: boolean; pts: number } | null}
+   */
+  syncRunAgainstBestStoredOnce() {
+    if (!this.track || !(this.playerDead || this.finished)) return null;
+    if (this._bestScoreSyncedThisRun) return this._bestScoreSyncResult;
+
+    const prev = this.readStoredBestScore();
+    const pts = Math.max(0, Math.floor(Number(this.points) || 0));
+    const newBest = pts > prev;
+    if (newBest) {
+      try {
+        localStorage.setItem(SCORE_TO_BEAT_LS_KEY, String(pts));
+      } catch {
+        /** ignore quota / privacy mode */
+      }
+    }
+    this._bestScoreSyncedThisRun = true;
+    this._bestScoreSyncResult = { prevBest: prev, newBest, pts };
+    return this._bestScoreSyncResult;
+  }
+
+  registerPredatorKillScore(grp, pd) {
+    if (!grp || !pd || grp.userData._predKillScoreDone) return;
+    grp.userData._predKillScoreDone = true;
+    const v = pd.pointValue;
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return;
+    this.points += Math.floor(v);
+  }
+
+  /** Keep overhead HP sprites from dominating the chase cam when grazing enemies fill the frame. */
+  clampOverheadHudSpriteHeights() {
+    const cam = this.camera;
+    const canv = this.canvas;
+    if (!cam?.isPerspectiveCamera || !(canv?.clientHeight > 0)) return;
+
+    const pxMax = canv.clientHeight * HUD_SPRITE_MAX_VIEWPORT_HEIGHT_FRAC;
+    const tanHalf = Math.tan(THREE.MathUtils.degToRad(cam.fov * 0.5));
+    const box = this._spriteClampBox;
+    /** @type {THREE.Sprite[]} */
+    const sprs = [];
+
+    for (const grp of this.predatorInst) {
+      const live = grp.userData.live;
+      const hud = grp.userData.hpHud;
+      const spr = hud?.sprite;
+      const base = grp.userData._hpHudBaseScaleCopy;
+      if (!spr || !base || !grp.visible || !live || live.hpNow <= 0) continue;
+      sprs.push(spr);
+      spr.scale.copy(base);
+    }
+
+    if (!this.playerDead && this.playerHpHud?.sprite && this._playerHpHudBaseScale) {
+      const ps = this.playerHpHud.sprite;
+      sprs.push(ps);
+      ps.scale.copy(this._playerHpHudBaseScale);
+    }
+
+    for (const spr of sprs) {
+      spr.updateWorldMatrix(true, false);
+      box.setFromObject(spr);
+      const dy = box.max.y - box.min.y;
+      if (!(dy > 1e-4)) continue;
+      this._spriteClampCenter.setFromMatrixPosition(spr.matrixWorld);
+      const dist = this._spriteClampCenter.distanceTo(cam.position);
+      if (!(dist > 0.12)) continue;
+      const visibleHWorld = 2 * dist * tanHalf;
+      const pix = (dy / visibleHWorld) * canv.clientHeight;
+      if (pix > pxMax) spr.scale.multiplyScalar(pxMax / pix);
+    }
+  }
+
+  /** Minimal top-right HUD (also shown while paused / dead via `main.js`). */
+  scoreHudHtml() {
+    if (!this.track) return "";
+    const beat = escapeHtml(String(this.readStoredBestScore()));
+    const cur = escapeHtml(String(Math.floor(this.points)));
+    return `<div style="text-align:right;line-height:1.35;font-size:13px;color:#eaf6ff;text-shadow:0 1px 8px rgba(0,22,52,.55)"><div><strong>${cur}</strong> <span style="opacity:.74;font-weight:600;font-size:11px;">pts</span></div><div style="opacity:.72;font-size:11px;margin-top:2px;font-weight:500">Score to beat <strong>${beat}</strong></div></div>`;
+  }
+
+  pauseGuideHtml() {
+    const name = this.track?.metadata?.name ? escapeHtml(String(this.track.metadata.name)) : "Course";
+
+    let nav = "";
+    if (this.track && !this.playerDead && !this.finished) {
+      nav = this.nextGoalHudLine();
+    }
+
+    return `<div style="margin-top:12px;line-height:1.5;color:#eaf6ff">${nav ? `<div style="margin-bottom:12px;line-height:1.45">${nav}</div>` : ""}<div style="opacity:.94;font-weight:650;font-size:12px">${name}</div><div style="opacity:.76;font-size:11px;line-height:1.55;margin-top:10px"><kbd>W</kbd>/<kbd>↑</kbd> stroke · <kbd>S</kbd>/<kbd>↓</kbd> reverse<br><kbd>A</kbd><kbd>D</kbd> / <kbd>←</kbd><kbd>→</kbd> turn (in place OK)<br><kbd>Space</kbd> venom cone (costs saliva)<br><kbd>F</kbd> fin kick · hold/release (sweet mega splash)<br><kbd>R</kbd> reset pond · <kbd>Esc</kbd> resume</div></div>`;
+  }
+
+  /**
+   * Full-screen death vignette sequencing: wash → headline → persisted score recap.
+   * @returns {{ show: boolean; html: string }}
+   */
+  deathOverlayInnerHtml() {
+    if (!this.playerDead || !this.track) return { show: false, html: "" };
+
+    const t = this._deathSeqTime;
+    const redAlpha = THREE.MathUtils.clamp(
+      0.12 + THREE.MathUtils.clamp(t / DEATH_RED_BUILD_S, 0, 1) * 0.74,
+      0,
+      0.95
+    );
+    const showTitle = t >= DEATH_RED_BUILD_S * 0.84;
+    const showScoreBand = t >= DEATH_PHASE_SCORE_REVEAL_AFTER_S;
+
+    let scoreBlock = "";
+    if (showScoreBand) {
+      const out = this.syncRunAgainstBestStoredOnce();
+      const ptsStr = escapeHtml(String(Math.floor(this.points)));
+      if (out) {
+        const shelf = escapeHtml(String(out.prevBest));
+        const bestLine = out.newBest
+          ? `<span style="color:#8effc4;font-weight:700;">New record — you raised the Score to beat.</span>`
+          : `<span style="opacity:.88;font-weight:500;">The Score to beat still stands at <strong>${shelf}</strong> pts.</span>`;
+        scoreBlock = `<div style="margin-top:18px;line-height:1.45;font-size:clamp(13px,2.2vw,16px);max-width:420px">${bestLine}<div style="margin-top:12px;color:#fff6f6;font-size:clamp(26px,4.5vw,38px);font-weight:840">Run · <strong>${ptsStr}</strong> pts</div><div style="margin-top:10px;font-size:12px;opacity:.8"><kbd>R</kbd> resets the pond for another skim.</div></div>`;
+      }
+    }
+
+    const html =
+      `<div style="position:relative;width:100%;height:100%;overflow:hidden;">` +
+      `<div style="position:absolute;inset:0;background:linear-gradient(#3a0606 0%,#120102 92%);opacity:${redAlpha.toFixed(4)};"></div>` +
+      `<div style="position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:20px;color:#ffeef0;text-align:center">` +
+      (showTitle
+        ? `<div style="font-size:clamp(34px,6vw,64px);font-weight:830;letter-spacing:.18em;text-transform:uppercase;text-shadow:0 4px 36px rgba(120,12,26,.92)">DEAD</div><div style="margin-top:8px;opacity:.86;font-size:clamp(13px,2vw,16px);max-width:420px;line-height:1.4">Hull integrity lost — larvae or grazers scraped through.</div>`
+        : ``) +
+      scoreBlock +
+      `</div>` +
+      `</div>`;
+
+    return { show: true, html };
+  }
+
   hudHtml() {
     if (!this.track) return "";
-    const name = escapeHtml(this.track.metadata.name);
-    const totalLaps = this.track.metadata.laps;
-    const meals = this.track.food ?? [];
-    const nibbled = meals.filter((f) => !f.active).length;
-    const lapLine = `${this.completedLaps}/${totalLaps}`;
-    const spd = (Math.abs(this.speed) * 3.6).toFixed(1);
-
-    const larvaeAlive = Array.isArray(this.predatorInst)
-      ? this.predatorInst.reduce(
-          (n, grp) => n + ((grp?.userData?.live?.hpNow ?? 0) > 0 ? 1 : 0),
-          0
-        )
-      : 0;
+    if (this.playerDead) return "";
 
     let done = "";
     if (this.finished) {
+      const totalLaps = this.track.metadata.laps;
       if (this.winReason === "buffet") {
-        done = `<div style="color:#bfffc4;margin-top:4px;"><strong>You cleared every bite.</strong></div>`;
+        done = `<div style="color:#bfffc4;margin-top:8px;line-height:1.4"><strong>Every bite cleared.</strong></div>`;
       } else if (this.winReason === "laps") {
-        done = `<div style="color:#bfffc4;margin-top:4px;"><strong>You finished ${escapeHtml(String(totalLaps))} lap(s).</strong></div>`;
+        done = `<div style="color:#bfffc4;margin-top:8px;line-height:1.4"><strong>${escapeHtml(String(totalLaps))} lap(s) finished.</strong></div>`;
       } else {
-        done = `<div style="color:#bfffc4;margin-top:4px;"><strong>Race complete.</strong></div>`;
+        done = `<div style="color:#bfffc4;margin-top:8px;line-height:1.4"><strong>Race complete.</strong></div>`;
       }
 
-      done += `<div style="margin-top:4px;"><strong>Total points: ${escapeHtml(String(this.points))}</strong></div>`;
+      const out = this.syncRunAgainstBestStoredOnce();
+      done += `<div style="margin-top:6px"><strong>${escapeHtml(String(Math.floor(this.points)))}</strong> <span style="opacity:.74">pts</span></div>`;
+      if (out) {
+        done += `<div style="opacity:.76;font-size:11px;line-height:1.4;margin-top:4px">${out.newBest ? "New Score to beat — nice run!" : `Not a new Score to beat (best ${escapeHtml(String(out.prevBest))}).`}</div>`;
+      }
+      done += `<div style="opacity:.74;font-size:11px;line-height:1.45;margin-top:8px"><kbd>R</kbd> reset pond</div>`;
     }
 
     const hpW = THREE.MathUtils.clamp((this.health / Math.max(this.healthMax, 1)) * 100, 0, 100);
@@ -1740,57 +2752,55 @@ export class Game {
     const vnTrackBorder = venomBelowAttack
       ? "1px solid rgba(120,118,132,.52)"
       : "1px solid rgba(210,180,255,.24)";
-    const vnLabelTone = venomBelowAttack ? "opacity:.72;color:#cfd0dc" : "opacity:.82";
+    const vnLabelTone = venomBelowAttack ? "opacity:.74;color:#d6dade" : "opacity:.82;color:#eaf6ff";
 
-    let hurt = "";
-    if (this.playerDead) {
-      hurt = `<div style="color:#ff9eab;margin-top:5px;line-height:1.45;"><strong>Hull breached.</strong> Mosquito larvae had the final bite — tap <kbd>R</kbd>.</div>`;
-    }
+    const surgeTag =
+      this.venomSurgeT > 0 ? `<span style="opacity:.74;font-size:10px"> · refill↑</span>` : "";
 
-    const surgeNote =
-      this.venomSurgeT > 0
-        ? ` <span style="color:#d6cbff;font-size:11px;opacity:.9">(digested prey → faster saliva refill)</span>`
-        : "";
-
-    const vitals = `<div style="margin-top:6px;line-height:1.35;display:flex;flex-direction:column;gap:7px">${hurt}
+    const vitals = `<div style="line-height:1.42;display:flex;flex-direction:column;gap:8px">
 <div>
-  <span style="opacity:.82;font-size:11px">Hull integrity (${Math.round(this.health)}/${Math.round(this.healthMax)})</span>
-  <div style="margin-top:2px;height:9px;background:rgba(0,0,0,.3);border-radius:4px;overflow:hidden;border:1px solid rgba(180,235,215,.28)"><div style="height:100%;width:${escapeHtml(String(hpW.toFixed(1)))}%;background:linear-gradient(90deg,#2ad8a9,#71f0c9)"></div></div>
+  <div style="font-size:11px;font-weight:630;opacity:.85">Hull <span style="opacity:.73;font-weight:600">${escapeHtml(`${Math.round(this.health)}/${Math.round(this.healthMax)}`)}</span></div>
+  <div style="margin-top:3px;height:8px;background:rgba(0,0,0,.3);border-radius:4px;overflow:hidden;border:1px solid rgba(165,238,218,.34)"><div style="height:100%;width:${escapeHtml(String(hpW.toFixed(1)))}%;background:linear-gradient(90deg,#2ad8a9,#71f0c9)"></div></div>
 </div>
 <div>
-  <span style="font-size:11px;${vnLabelTone}">Venom saliva (${Math.round(this.venom)}/${Math.round(this.venomMax)})${surgeNote}</span>
-  <div style="margin-top:2px;height:9px;background:rgba(0,0,0,.32);border-radius:4px;overflow:hidden;border:${vnTrackBorder};position:relative"><div style="height:100%;width:${escapeHtml(String(vnW.toFixed(1)))}%;background:${vnFillBg}"></div><div aria-hidden="true" style="pointer-events:none;position:absolute;top:0;bottom:0;left:${escapeHtml(venomBiteCostPct.toFixed(2))}%;width:1px;background:rgba(255,255,255,0.22);box-shadow:0 0 2px rgba(0,0,0,.5)"></div></div>
+  <div style="font-size:11px;font-weight:630;opacity:.85">${`<span style="${vnLabelTone}">Venom / saliva ${escapeHtml(`${Math.round(this.venom)}/${Math.round(this.venomMax)}`)}</span>`}${surgeTag}</div>
+  <div style="margin-top:3px;height:8px;background:rgba(0,0,0,.32);border-radius:4px;overflow:hidden;border:${vnTrackBorder};position:relative"><div style="height:100%;width:${escapeHtml(String(vnW.toFixed(1)))}%;background:${vnFillBg}"></div><div aria-hidden="true" style="pointer-events:none;position:absolute;top:0;bottom:0;left:${escapeHtml(venomBiteCostPct.toFixed(2))}%;width:1px;background:rgba(255,255,255,0.24);box-shadow:0 0 2px rgba(0,0,0,.5)"></div></div>
 </div>
 </div>`;
 
-    let goalHtml = "";
-    const navHint = !this.finished && !this.playerDead ? this.nextGoalHudLine() : "";
-    if (navHint) {
-      goalHtml = `<div style="color:#aaf0ff;margin-top:3px;line-height:1.45">${navHint}</div>`;
+    let finKickHud = "";
+    if (!this.finished && this.strikeKickCharging) {
+      const ct = this.strikeChargeT;
+      const megaLo = FIN_KICK_CHARGE.megaMin;
+      const megaHi = FIN_KICK_CHARGE.megaMax;
+      const oh = FIN_KICK_CHARGE.overholdMin;
+      let zone = "Charging kick…";
+      let tone = "#9ae8ff";
+      if (ct >= oh) {
+        zone = "Overcharge hurts you — release!";
+        tone = "#ff819a";
+      } else if (ct >= megaLo && ct <= megaHi) {
+        zone = "Mega sweet-spot · release!";
+        tone = "#baff8f";
+      } else if (ct > megaHi && ct < oh) {
+        zone = "Late — weak kick";
+        tone = "#ffd48a";
+      } else if (ct > FIN_KICK_CHARGE.tapMax && ct < megaLo) {
+        zone = "Keep holding toward mega tier…";
+        tone = "#dfd1ff";
+      } else if (ct <= FIN_KICK_CHARGE.tapMax) {
+        zone = "Hold for bigger splash · tap = narrow slap";
+        tone = "#bdefff";
+      }
+      const barPct = THREE.MathUtils.clamp((ct / oh) * 100, 0, 100);
+      finKickHud =
+        `<div style="margin-top:6px">` +
+        `<div style="font-size:10px;font-weight:650;color:${tone};line-height:1.38"><span style="opacity:.74">Kick ·</span> ${escapeHtml(zone)}</div>` +
+        `<div style="margin-top:4px;height:5px;background:rgba(0,0,0,.4);border-radius:4px;overflow:hidden;border:1px solid rgba(255,255,255,0.1)"><div style="height:100%;width:${escapeHtml(barPct.toFixed(1))}%;background:linear-gradient(90deg,#7b2cff,#00c8ff,#62ff82,#ffe94d,#ff2d92)"></div></div>` +
+        `</div>`;
     }
 
-    const grazingLine =
-      larvaeAlive > 0
-        ? `<span style="opacity:.75"> Grazers left: <strong>${larvaeAlive}</strong></span>`
-        : `<span style="opacity:.72"> Grazers cleared</span>`;
-
-    let footer = "";
-    if (this.playerDead || this.finished) {
-      footer = `<span style="opacity:.75">Pick another course or <kbd>R</kbd>.</span>${grazingLine}`;
-    } else {
-      footer = `<span style="opacity:.75"><kbd>W</kbd>/<kbd>↑</kbd> forward · <kbd>S</kbd>/<kbd>↓</kbd> reverse · <kbd>A</kbd><kbd>D</kbd> steer (works while stationary) · <kbd>Space</kbd> venom spray cone (ranges ahead; nearer larvae take heavier venom) · <kbd>R</kbd> reset.<br>${grazingLine}</span>`;
-    }
-
-    const rows = [
-      `<strong>${name}</strong> <span style="opacity:.76;font-weight:500;font-size:11px;">backswimmer (Notonectidae)</span>`,
-      goalHtml,
-      vitals,
-      `Points ${this.points} · Snacks ${nibbled}/${Math.max(meals.length, 0)}`,
-      `Speed≈ ${spd} · Food stacks ${this.foodStacks} · Gate ${this.nextCp + 1}/${Math.max(this.track.checkpoints.length, 1)} · Laps ${lapLine}`,
-      done,
-      footer,
-    ];
-    return rows.join("");
+    return vitals + finKickHud + done;
   }
 
   render() {

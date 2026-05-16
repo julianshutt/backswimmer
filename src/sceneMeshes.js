@@ -4,10 +4,12 @@ import { FOOD_PALETTE } from "./trackLoader.js";
 export const COLORS = {
   water: 0x0c4f6f,
   waterDeep: 0x073550,
-  /** Notonectid backswimmer: dark dorsum, reflective ventral keel. */
-  boatBody: 0x3a484c,
-  boatShell: 0xcad6de,
-  boatLeg: 0x353c40,
+  /** Highlights for procedural water tiling (cyan shift). */
+  lightWaterSheen: 0x1f8aae,
+  /** Notonectid backswimmer — bumped values read against tinted water from chase cam. */
+  boatBody: 0x5d717c,
+  boatShell: 0xe4eef5,
+  boatLeg: 0x474f56,
   boatEye: 0x1a0505,
   lilyPad: 0x2f7d32,
   fish: 0x8b5f3c,
@@ -16,6 +18,12 @@ export const COLORS = {
   mozzieGrub: 0xc96f4a,
   mozzieStripe: 0xe8d4bc,
   mozzieSnorkel: 0x8f3040,
+  /** Mosquito wriggler riff — dorsal thorax ochre, abdomen muddy ochre-brown. */
+  mozzieHead: 0x3d3024,
+  mozzieThorax: 0xb89a72,
+  mozzieAbdomen: 0xa88863,
+  mozzieVentrum: 0xdcc4a8,
+  mozzieSiphonChitin: 0x6f5238,
   planarianPink: 0xd95aa4,
   planarianStem: 0xfff0f7,
   daphnidCore: 0x7ef3d9,
@@ -24,6 +32,19 @@ export const COLORS = {
   hydraGlow: 0xc8fff1,
   scorpionHull: 0x5f4f38,
   scorpionAccent: 0xb89b6b,
+  /** Planarian ribbon — ventral cream, dorsal rose flush. */
+  planarianVentral: 0xf5e8f0,
+  planarianEyespot: 0x1a1018,
+  /** Daphnid valves / rostrum sheen. */
+  daphnidRostrum: 0x4ac4b0,
+  daphnidLeg: 0x8ad4ce,
+  /** Hydra polyp — tentacle vs cup. */
+  hydraPedestal: 0x3d5c48,
+  hydraTentacle: 0x7aab8c,
+  hydraNematocyst: 0xe8ffff,
+  /** Water-scorpion riff — wing-pad & dorsal keel. */
+  scorpionWingPad: 0x4a4030,
+  scorpionKeel: 0x2a2318,
   /** Ephemeral prey-chunk pickup (hemolymph nibble). */
   preyNibble: 0xffe8aa,
 };
@@ -147,20 +168,64 @@ function roundRectPathStroke(ctx, x, y, w, h, r) {
 
 export function lilyGroup(radius) {
   const g = new THREE.Group();
+  const padRot = Math.random() * Math.PI * 2;
+
+  const padMat = new THREE.MeshStandardMaterial({
+    color: COLORS.lilyPad,
+    roughness: 0.78,
+    metalness: 0.02,
+  });
   const pad = new THREE.Mesh(
     new THREE.CylinderGeometry(radius, radius * 0.97, 0.22, 28, 1),
-    new THREE.MeshStandardMaterial({ color: COLORS.lilyPad, roughness: 0.78, metalness: 0.02 })
+    padMat
   );
   pad.position.y = 0.11;
+  pad.rotation.y = padRot;
+  pad.scale.set(1.08, 1, 0.91);
   pad.castShadow = true;
   pad.receiveShadow = true;
   g.add(pad);
+
+  const rimRing = Math.min(44, Math.max(26, Math.floor(radius * 9)));
+  const rim = new THREE.Mesh(
+    new THREE.TorusGeometry(radius * 0.968, Math.max(radius * 0.048, 0.14), 4, rimRing),
+    new THREE.MeshStandardMaterial({
+      color: 0x57c55c,
+      roughness: 0.74,
+      metalness: 0.02,
+    })
+  );
+  rim.rotation.x = Math.PI / 2;
+  rim.position.y = 0.2;
+  rim.rotation.z = padRot + 0.22;
+  g.add(rim);
+
+  const veinMat = new THREE.MeshStandardMaterial({
+    color: 0xc4e894,
+    roughness: 0.74,
+    metalness: 0.01,
+    transparent: true,
+    opacity: 0.74,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  for (let v = 0; v < 5; v += 1) {
+    const vn = new THREE.Mesh(
+      new THREE.PlaneGeometry(radius * 0.93, radius * 0.1),
+      veinMat
+    );
+    vn.rotation.x = -Math.PI / 2;
+    vn.rotation.z = padRot + (v / 5) * Math.PI + 0.06;
+    vn.position.y = 0.203;
+    g.add(vn);
+  }
 
   const cut = new THREE.Mesh(
     new THREE.CylinderGeometry(radius * 0.92, radius * 0.9, 0.04, 8, 1),
     new THREE.MeshStandardMaterial({ color: 0xb8e986, transparent: true, opacity: 0.35 })
   );
   cut.position.y = 0.2;
+  cut.rotation.z = padRot + 0.94;
   g.add(cut);
   return g;
 }
@@ -218,16 +283,71 @@ export function rippleGroup(worldRadius) {
 }
 
 export function fishGroup(len, wid, ht) {
-  const mat = new THREE.MeshStandardMaterial({ color: COLORS.fish, roughness: 0.6, metalness: 0.06 });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(len, ht, wid), mat);
-  body.castShadow = true;
-  const tail = new THREE.Mesh(new THREE.ConeGeometry(wid * 0.82, wid * 1.85, 3), mat.clone());
+  /** Read as woody debris / drowned branch / fish body from chase cam silhouette. */
+  const bark = new THREE.MeshStandardMaterial({
+    color: COLORS.fish,
+    roughness: 0.82,
+    metalness: 0.03,
+  });
+  const barkDeep = bark.clone();
+  barkDeep.color.multiplyScalar(0.74);
+  barkDeep.roughness = 0.9;
+
+  const moss = bark.clone();
+  moss.color.lerp(new THREE.Color(0x4d6d48), 0.62);
+  moss.color.multiplyScalar(0.94);
+  moss.roughness = 0.92;
+
+  const capR = THREE.MathUtils.clamp(Math.min(wid, ht) * 0.41, 0.11, ht * 0.48);
+  const trunkStem = Math.max(len * 0.55, capR * 2.2 + 0.08);
+  const radial = THREE.MathUtils.clamp(Math.floor(7 + len * 0.45), 6, 13);
+
+  const trunk = new THREE.Mesh(
+    new THREE.CapsuleGeometry(capR, trunkStem, 4, radial),
+    bark
+  );
+  trunk.rotation.z = Math.PI / 2;
+  trunk.position.x = -len * 0.02;
+  trunk.castShadow = true;
+
+  const snoutLen = len * 0.22;
+  const snout = new THREE.Mesh(
+    new THREE.CylinderGeometry(capR * 0.58, capR * 0.92, snoutLen, radial, 1),
+    barkDeep
+  );
+  snout.rotation.z = Math.PI / 2;
+  snout.position.x = len * 0.36;
+  snout.castShadow = true;
+
+  const tailMat = barkDeep.clone();
+  tailMat.color.multiplyScalar(0.94);
+  const tail = new THREE.Mesh(new THREE.ConeGeometry(capR * 0.72, wid * 1.55, 5, 2), tailMat);
   tail.rotation.z = Math.PI / 2;
-  tail.rotation.y = Math.PI / 6;
-  tail.position.x = -len * 0.48;
+  tail.rotation.y = Math.PI * 0.19;
+  tail.position.x = -len * 0.46;
   tail.castShadow = true;
+
+  const stub = new THREE.Mesh(
+    new THREE.CylinderGeometry(capR * 0.22, capR * 0.36, len * 0.14, 5, 1),
+    moss
+  );
+  stub.rotation.order = "YXZ";
+  stub.rotation.z = Math.PI / 2 + 0.48;
+  stub.rotation.y = 0.55;
+  stub.position.set(len * 0.02, capR * 0.42, wid * 0.36);
+  stub.castShadow = true;
+
+  const knot = new THREE.Mesh(
+    new THREE.TorusGeometry(capR * 1.06, Math.max(capR * 0.11, 0.08), 4, Math.min(16, radial + 2)),
+    barkDeep
+  );
+  knot.rotation.y = Math.PI / 2;
+  knot.rotation.x = 0.12;
+  knot.position.set(-len * 0.12, capR * 0.06, capR * 0.06);
+  knot.castShadow = true;
+
   const grp = new THREE.Group();
-  grp.add(body, tail);
+  grp.add(trunk, snout, tail, stub, knot);
   return grp;
 }
 
@@ -278,28 +398,32 @@ export function boatGroup() {
 
   const dorsal = new THREE.MeshStandardMaterial({
     color: COLORS.boatBody,
-    roughness: 0.78,
-    metalness: 0.05,
-    emissive: 0x271c12,
-    emissiveIntensity: 0.04,
+    roughness: 0.71,
+    metalness: 0.08,
+    emissive: 0x385666,
+    emissiveIntensity: 0.068,
   });
 
   const ventral = new THREE.MeshStandardMaterial({
     color: COLORS.boatShell,
-    roughness: 0.84,
-    metalness: 0.03,
+    roughness: 0.72,
+    metalness: 0.12,
+    emissive: 0x9ec8ea,
+    emissiveIntensity: 0.052,
   });
 
   const legMat = new THREE.MeshStandardMaterial({
     color: COLORS.boatLeg,
-    roughness: 0.73,
-    metalness: 0.02,
+    roughness: 0.68,
+    metalness: 0.05,
   });
 
   const eyeMat = new THREE.MeshStandardMaterial({
     color: COLORS.boatEye,
-    roughness: 0.45,
-    metalness: 0.1,
+    roughness: 0.42,
+    metalness: 0.14,
+    emissive: 0x4a0810,
+    emissiveIntensity: 0.06,
   });
 
   /** Abdomen (+ hemelytron bulk) swept back behind wings */
@@ -324,7 +448,7 @@ export function boatGroup() {
 
   /** Narrow dark “furrow” dividing hemelytron outline (cheap silhouette cue) */
   const seamMat = dorsal.clone();
-  seamMat.color = new THREE.Color(0x2d221a);
+  seamMat.color = new THREE.Color(0x382d28);
   seamMat.emissiveIntensity = 0;
   seamMat.metalness = 0.06;
   const seam = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.04, 1.06), seamMat);
@@ -471,53 +595,108 @@ export function advanceFish(grp, data, dt) {
 }
 
 /**
- * Hostile larva grazing the swimmer’s hemolymph — distinct muddy palette from edible food larvae.
+ * Hostile larva grazing the swimmer’s hemolymph — Culicinae-style wriggler
+ * silhouette: small head, swollen thorax, slender tapered abdomen + posterior respiratory siphon.
  */
 export function predatorMozzieMesh() {
   const grp = new THREE.Group();
 
-  /** Big silhouette for aerial chase cam (was ~half the player hull — read as stray pixels). */
+  /** World-scale readability on chase cam; mesh proportions are anatomical multiples below. */
   const SCALE = 2.45;
   grp.scale.setScalar(SCALE);
 
-  const bodyMat = new THREE.MeshStandardMaterial({
-    color: COLORS.mozzieGrub,
-    roughness: 0.5,
-    metalness: 0.06,
-    emissive: 0x552211,
-    emissiveIntensity: 0.092,
+  const dorsalRough = new THREE.MeshStandardMaterial({
+    color: COLORS.mozzieAbdomen,
+    roughness: 0.55,
+    metalness: 0.04,
+    emissive: 0x2a1510,
+    emissiveIntensity: 0.04,
   });
 
-  const stripeMat = bodyMat.clone();
-  stripeMat.color = new THREE.Color(COLORS.mozzieStripe);
-  stripeMat.emissive = new THREE.Color(0x331108);
-  stripeMat.emissiveIntensity = 0.055;
+  const thoraxMat = dorsalRough.clone();
+  thoraxMat.color = new THREE.Color(COLORS.mozzieThorax);
+  thoraxMat.emissive = new THREE.Color(0x3a2820);
 
-  const snorkMat = bodyMat.clone();
-  snorkMat.color = new THREE.Color(COLORS.mozzieSnorkel);
-  snorkMat.emissiveIntensity = 0.05;
+  const headMat = dorsalRough.clone();
+  headMat.color = new THREE.Color(COLORS.mozzieHead);
+  headMat.emissiveIntensity = 0.02;
+  headMat.metalness = 0.05;
 
-  const seg = new THREE.Mesh(new THREE.SphereGeometry(0.38, 14, 12), bodyMat);
-  seg.scale.set(0.92, 0.52, 1.24);
-  seg.position.set(0, 0.04, -0.12);
-  const segMid = seg.clone();
-  segMid.material = stripeMat;
-  segMid.scale.multiplyScalar(0.88);
-  segMid.position.set(0, 0.05, 0.24);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.36, 12, 10), snorkMat);
-  head.scale.set(0.92, 0.56, 0.95);
-  head.position.set(0, 0.07, 0.62);
+  const ventMat = dorsalRough.clone();
+  ventMat.color = new THREE.Color(COLORS.mozzieVentrum);
+  ventMat.emissiveIntensity = 0.03;
 
-  const snork = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 0.52, 8, 2), snorkMat);
-  snork.position.set(-0.2, 0.11, -0.45);
-  snork.rotation.z = 0.32;
-  snork.rotation.x = -0.22;
+  const siphonMat = dorsalRough.clone();
+  siphonMat.color = new THREE.Color(COLORS.mozzieSiphonChitin);
+  siphonMat.roughness = 0.48;
+  siphonMat.metalness = 0.08;
 
-  const hook = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.15, 4), snorkMat.clone());
-  hook.rotation.z = -Math.PI / 2;
-  hook.position.set(0.5, -0.04, -0.4);
+  /** Head capsule (+Z forward) ~ darker sclerotin. */
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.19, 12, 10), headMat);
+  head.scale.set(0.94, 0.78, 1.06);
+  head.position.set(0, 0.05, 0.56);
 
-  /** Waterline donut read from chase camera + breaks chroma camouflage vs duckweed / grid. */
+  /** Faint mouth-brush hints on ventral head (surface-filtering morphology). */
+  const brushGrp = new THREE.Group();
+  brushGrp.position.set(0, -0.11, 0.61);
+  for (let b = -1; b <= 1; b += 1) {
+    const bristle = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.012, 0.026, 0.18, 4, 1),
+      headMat.clone()
+    );
+    bristle.material.color = new THREE.Color(COLORS.mozzieStripe).lerp(
+      bristle.material.color,
+      0.62
+    );
+    bristle.material.emissiveIntensity = 0;
+    bristle.rotation.x = Math.PI * 2 * 0.23;
+    bristle.rotation.z = b * 0.62;
+    bristle.rotation.y = b * -0.12;
+    bristle.position.set(b * 0.07, -0.04, -0.04);
+    brushGrp.add(bristle);
+  }
+
+  /** Swollen thorax fused with abdomen base. */
+  const thorax = new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 12), thoraxMat);
+  thorax.scale.set(1.06, 0.72, 0.94);
+  thorax.position.set(0, 0.065, 0.24);
+
+  const thoraxBulge = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 10), thoraxMat);
+  thoraxBulge.scale.set(0.88, 0.58, 0.92);
+  thoraxBulge.position.set(-0.04, -0.04, -0.02);
+
+  /** Slender dorsiventrally flattened abdomen tapering aft. */
+  const segCount = 8;
+  const abdomenParts = [];
+  for (let s = 0; s < segCount; s += 1) {
+    const t = segCount <= 1 ? 0 : s / (segCount - 1);
+    const sz = THREE.MathUtils.lerp(0.22, -0.58, t);
+    const radiusXZ = THREE.MathUtils.lerp(0.2, 0.11, Math.pow(t, 0.72));
+    const segMat = ventMat.clone();
+    if (s % 2 === 0) segMat.color = new THREE.Color(COLORS.mozzieStripe).lerp(segMat.color, 0.42);
+    const segMesh = new THREE.Mesh(new THREE.SphereGeometry(radiusXZ, 10, 8), segMat);
+    segMesh.scale.set(1.12, 0.56, 0.58);
+    segMesh.position.set(0, THREE.MathUtils.lerp(0.052, -0.02, t) + Math.sin(t * Math.PI) * 0.018, sz);
+    abdomenParts.push(segMesh);
+  }
+
+  /** Posterior respiratory siphon — breathing trumpet on tail, dorsally angled. */
+  const siphonLen = 0.52;
+  const siphonStem = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.06, 0.078, siphonLen, 10, 2),
+    siphonMat
+  );
+  const backZ = -0.74;
+  siphonStem.position.set(0, 0.1, backZ + 0.02);
+  siphonStem.rotation.x = -Math.PI * 2 * 0.18;
+
+  const siphonBell = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.09, 10, 1, false), siphonMat);
+  siphonBell.rotation.z = Math.PI;
+  const bellOff = Math.cos(siphonStem.rotation.x) * (siphonLen * 0.52);
+  const bellLift = Math.sin(-siphonStem.rotation.x) * (siphonLen * 0.52);
+  siphonBell.position.set(0, 0.1 + bellLift, backZ - 0.04 + bellOff);
+
+  /** Waterline donut — surface-disturbance silhouette from chase cam. */
   const wakeRing = new THREE.Mesh(
     new THREE.RingGeometry(0.3, 0.46, 40),
     new THREE.MeshBasicMaterial({
@@ -534,28 +713,24 @@ export function predatorMozzieMesh() {
   wakeRing.frustumCulled = false;
   wakeRing.castShadow = false;
   wakeRing.receiveShadow = false;
-  /** Undo parent scale so the surface marker stays postcard-sized (~0.46 m Ø). */
   wakeRing.scale.setScalar(1 / SCALE);
 
   grp.userData.predWakeMat = wakeRing.material;
-  grp.add(seg, segMid, head, snork, hook, wakeRing);
+  grp.add(head, brushGrp, thorax, thoraxBulge, ...abdomenParts, siphonStem, siphonBell, wakeRing);
 
   grp.traverse((o) => {
     if ("isMesh" in o && o.isMesh) {
-      const isWake = /** @type {THREE.Mesh} */ (o);
-      /** Ring is unlit/UI-like; segmented body carries shadows after scale-up. */
-      if (isWake === wakeRing) {
-        return;
-      }
-      o.castShadow = true;
-      o.receiveShadow = true;
-      o.frustumCulled = false;
+      const wm = /** @type {THREE.Mesh} */ (o);
+      if (wm === wakeRing) return;
+      wm.castShadow = true;
+      wm.receiveShadow = true;
+      wm.frustumCulled = false;
     }
   });
 
   grp.userData.baseScale = SCALE;
 
-  const hpHud = createHpStripSprite(2.95, 0.62, 2.95);
+  const hpHud = createHpStripSprite(2.95, 0.62, 2.98);
   grp.add(hpHud.sprite);
   grp.userData.hpHud = hpHud;
 
@@ -563,69 +738,130 @@ export function predatorMozzieMesh() {
   return grp;
 }
 
-/** Flatworm riff — rippling ribbon + sucker; spits toxin globs. */
+/** Flatworm riff — S-curve ribbon gut, dorsal rose flush & eyespots, adhesive anterior disc & pharynx ring. */
 export function predatorPlanarianMesh() {
   const grp = new THREE.Group();
 
   const SCALE = 2.62;
   grp.scale.setScalar(SCALE);
 
-  const skin = new THREE.MeshStandardMaterial({
-    color: COLORS.planarianStem,
-    roughness: 0.54,
-    metalness: 0.06,
-    emissive: 0x884488,
-    emissiveIntensity: 0.05,
+  const wormCurve = new THREE.CatmullRomCurve3(
+    [
+      new THREE.Vector3(0.02, -0.02, -0.9),
+      new THREE.Vector3(-0.08, -0.015, -0.46),
+      new THREE.Vector3(0.05, -0.025, 0),
+      new THREE.Vector3(-0.06, -0.015, 0.44),
+      new THREE.Vector3(0.04, -0.02, 0.86),
+      new THREE.Vector3(0.02, -0.028, 0.98),
+    ],
+    false,
+    "catmullrom",
+    0.38
+  );
+
+  const ventralSkin = new THREE.MeshStandardMaterial({
+    color: COLORS.planarianVentral,
+    roughness: 0.5,
+    metalness: 0.025,
+    emissive: 0xccb8cc,
+    emissiveIntensity: 0.028,
   });
-  const dorsal = skin.clone();
-  dorsal.color = new THREE.Color(COLORS.planarianPink);
-  dorsal.emissive = new THREE.Color(0xaa2266);
+  const dorsal = new THREE.MeshStandardMaterial({
+    color: COLORS.planarianPink,
+    roughness: 0.34,
+    metalness: 0.035,
+    emissive: 0xaa2266,
+    emissiveIntensity: 0.06,
+  });
 
-  let z = -0.18;
-  for (let s = 0; s < 5; s += 1) {
-    const el = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 8), s % 2 ? dorsal : skin);
-    el.scale.set(0.95, 0.46, 0.85);
-    el.position.set(Math.sin(s * 0.18) * 0.035, Math.sin(s * 0.55) * 0.04, z + s * 0.28);
-    grp.add(el);
-  }
+  const tubeMain = new THREE.TubeGeometry(wormCurve, 72, 0.088, 8, false);
+  const ribbon = new THREE.Mesh(tubeMain, ventralSkin);
+  ribbon.scale.set(1.2, 0.33, 1.05);
 
-  const sucker = new THREE.Mesh(new THREE.SphereGeometry(0.24, 10, 8), dorsal.clone());
-  sucker.position.set(-0.04, -0.04, z - 0.28);
-  grp.add(sucker);
+  const tubePink = new THREE.TubeGeometry(wormCurve, 56, 0.064, 6, false);
+  const dorsalBand = new THREE.Mesh(tubePink, dorsal);
+  dorsalBand.scale.set(1.14, 0.52, 1.02);
+  dorsalBand.position.y = 0.046;
 
-  const spitMark = new THREE.Mesh(
-    new THREE.RingGeometry(0.06, 0.12, 18),
+  const espMat = new THREE.MeshStandardMaterial({
+    color: COLORS.planarianEyespot,
+    roughness: 0.78,
+    emissive: 0x331122,
+    emissiveIntensity: 0.065,
+    metalness: 0.1,
+  });
+  const tEyes = 0.9;
+  const ptEyes = wormCurve.getPointAt(tEyes);
+  const tan = wormCurve.getTangentAt(tEyes);
+  const perp = new THREE.Vector3(-tan.z, 0, tan.x);
+  const perLen = Math.hypot(perp.x, perp.z) || 1;
+  perp.multiplyScalar(0.078 / perLen);
+  const eyeLMesh = new THREE.Mesh(new THREE.SphereGeometry(0.036, 6, 5), espMat);
+  eyeLMesh.position.set(ptEyes.x + perp.x, ptEyes.y + 0.048, ptEyes.z + perp.z);
+  const eyeRMesh = new THREE.Mesh(new THREE.SphereGeometry(0.036, 6, 5), espMat);
+  eyeRMesh.position.set(ptEyes.x - perp.x, ptEyes.y + 0.048, ptEyes.z - perp.z);
+
+  const suckerTip = wormCurve.getPointAt(0.998);
+  const sucker = new THREE.Mesh(new THREE.SphereGeometry(0.074, 10, 8), dorsal.clone());
+  sucker.material.roughness = 0.28;
+  sucker.scale.set(0.92, 0.42, 0.9);
+  sucker.position.copy(suckerTip.clone().setY(suckerTip.y + 0.024));
+
+  const pitPt = wormCurve.getPointAt(0.54);
+  const pharynxPit = new THREE.Mesh(new THREE.TorusGeometry(0.048, 0.014, 8, 20), dorsal.clone());
+  pharynxPit.material.color = new THREE.Color(0x4a2740);
+  pharynxPit.material.emissiveIntensity = 0.02;
+  pharynxPit.rotation.x = Math.PI / 2;
+  pharynxPit.position.copy(pitPt.clone().add(new THREE.Vector3(0, -0.05, -0.01)));
+
+  /** Pharynx / gland glow — toxin hint for ranged spitter reads. */
+  const spitGlow = new THREE.Mesh(
+    new THREE.RingGeometry(0.068, 0.14, 20),
     new THREE.MeshBasicMaterial({
-      color: 0xff9fe5,
+      color: 0xff8fd8,
       transparent: true,
-      opacity: 0.92,
+      opacity: 0.74,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
     })
   );
-  spitMark.rotation.x = -Math.PI / 2;
-  spitMark.position.set(0.2, -0.02, 0.92);
-  spitMark.scale.setScalar(1 / SCALE);
-  grp.add(spitMark);
+  spitGlow.rotation.x = -Math.PI / 2;
+  const glowPt = wormCurve.getPointAt(0.84);
+  spitGlow.position.set(glowPt.x + 0.08, glowPt.y - 0.02, glowPt.z + 0.02);
+  spitGlow.scale.setScalar(1 / SCALE);
+
+  grp.add(
+    ribbon,
+    dorsalBand,
+    eyeLMesh,
+    eyeRMesh,
+    sucker,
+    pharynxPit,
+    spitGlow
+  );
 
   grp.traverse((o) => {
-    if ("isMesh" in o && o.isMesh && !o.material?.blending) {
-      o.castShadow = true;
-      o.receiveShadow = true;
-      o.frustumCulled = false;
+    if ("isMesh" in o && o.isMesh && o.material && !Array.isArray(o.material)) {
+      const m = /** @type {THREE.MeshStandardMaterial | THREE.MeshBasicMaterial} */ (o.material);
+      const isGlow = "blending" in m && m.blending === THREE.AdditiveBlending;
+      /** @type {THREE.Mesh} */ (o).frustumCulled = false;
+      if (!isGlow) {
+        o.castShadow = true;
+        o.receiveShadow = true;
+      }
     }
   });
 
   grp.userData.baseScale = SCALE;
-  const hpHud = createHpStripSprite(2.35, 0.58, 2.92);
+  const hpHud = createHpStripSprite(2.45, 0.58, 2.94);
   grp.add(hpHud.sprite);
   grp.userData.hpHud = hpHud;
   grp.userData.idlePhase = Math.random() * Math.PI * 2;
   return grp;
 }
 
-/** Cladoceran riff — translucent carapace, single cyclopean eye flare. */
+/** Cladoceran riff — hinged bivalve carapace, rostral beak & paired antennae, brood-pocket read. */
 export function predatorDaphnidMesh() {
   const grp = new THREE.Group();
   const SCALE = 2.5;
@@ -633,96 +869,236 @@ export function predatorDaphnidMesh() {
 
   const shellMat = new THREE.MeshStandardMaterial({
     color: COLORS.daphnidShell,
-    roughness: 0.32,
-    metalness: 0.06,
+    roughness: 0.38,
+    metalness: 0.045,
     transparent: true,
-    opacity: 0.88,
+    opacity: 0.82,
     emissive: 0x226655,
-    emissiveIntensity: 0.04,
+    emissiveIntensity: 0.045,
     side: THREE.DoubleSide,
   });
-  const body = new THREE.Mesh(new THREE.SphereGeometry(0.36, 12, 10), shellMat);
-  body.scale.set(0.94, 0.58, 1.18);
-  body.position.y = 0.04;
 
-  const coreMat = shellMat.clone();
-  coreMat.color = new THREE.Color(COLORS.daphnidCore);
-  coreMat.opacity = 1;
-  const core = new THREE.Mesh(new THREE.SphereGeometry(0.24, 10, 8), coreMat);
-  core.scale.set(0.88, 0.46, 0.96);
-  core.position.set(0, 0.08, -0.04);
+  const vGeom = new THREE.SphereGeometry(0.43, 16, 12);
+  const valveL = new THREE.Mesh(vGeom, shellMat);
+  valveL.scale.set(0.48, 0.62, 0.93);
+  valveL.rotation.set(-0.06, -0.14, -0.06);
+  valveL.position.set(-0.16, 0.05, -0.04);
+  const valveR = new THREE.Mesh(vGeom, shellMat);
+  valveR.scale.set(valveL.scale.x, valveL.scale.y, valveL.scale.z);
+  valveR.rotation.set(-0.06, 0.14, 0.06);
+  valveR.position.set(-valveL.position.x, valveL.position.y, valveL.position.z);
 
-  const eye = new THREE.Mesh(
-    new THREE.SphereGeometry(0.068, 8, 6),
+  const dorsalStripe = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.04, 0.92), shellMat.clone());
+  dorsalStripe.material.opacity = 0.55;
+  dorsalStripe.material.color = new THREE.Color(0x1d6b5c);
+  dorsalStripe.position.set(0, 0.2, -0.02);
+  dorsalStripe.rotation.z = Math.PI / 2;
+
+  const coreMat = new THREE.MeshStandardMaterial({
+    color: COLORS.daphnidCore,
+    roughness: 0.52,
+    emissive: 0x44ddcc,
+    emissiveIntensity: 0.1,
+    metalness: 0.06,
+    transparent: true,
+    opacity: 0.55,
+    side: THREE.DoubleSide,
+  });
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.21, 10, 8), coreMat);
+  core.scale.set(0.86, 0.44, 0.78);
+  core.position.set(0.02, 0.045, -0.08);
+
+  const rostrum = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.018, 0.055, 0.42, 6, 1),
     new THREE.MeshStandardMaterial({
-      color: 0x1a0510,
-      roughness: 0.42,
-      emissive: 0xffeeaa,
-      emissiveIntensity: 0.12,
-      metalness: 0.1,
+      color: COLORS.daphnidRostrum,
+      roughness: 0.28,
+      metalness: 0.12,
+      emissive: 0x226655,
+      emissiveIntensity: 0.06,
+      transparent: true,
+      opacity: 0.9,
+      side: THREE.DoubleSide,
     })
   );
-  eye.position.set(0, 0.12, 0.62);
+  rostrum.rotation.x = Math.PI / 2;
+  rostrum.rotation.z = Math.PI / 48;
+  rostrum.position.set(0, 0.08, 0.72);
 
-  const ant = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.022, 0.03, 0.72, 4, 2),
-    new THREE.MeshStandardMaterial({ color: 0xbef7ff, roughness: 0.64 })
+  const eyeMat = new THREE.MeshStandardMaterial({
+    color: 0x0a0408,
+    roughness: 0.52,
+    emissive: 0xffeeaa,
+    emissiveIntensity: 0.18,
+    metalness: 0.08,
+  });
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(0.062, 8, 6), eyeMat);
+  eye.scale.set(1.06, 0.78, 0.96);
+  eye.position.set(0, 0.14, 0.74);
+
+  const corneaMat = new THREE.MeshStandardMaterial({
+    color: 0xcfffff,
+    roughness: 0.06,
+    metalness: 0.42,
+    transparent: true,
+    opacity: 0.28,
+    emissive: 0x88eeff,
+    emissiveIntensity: 0.12,
+    side: THREE.DoubleSide,
+  });
+  const cornea = new THREE.Mesh(new THREE.SphereGeometry(0.069, 8, 6), corneaMat);
+  cornea.scale.copy(eye.scale);
+  cornea.position.copy(eye.position);
+  cornea.position.z += 0.038;
+
+  const legMat = new THREE.MeshStandardMaterial({
+    color: COLORS.daphnidLeg,
+    roughness: 0.62,
+    metalness: 0.03,
+    emissive: 0x224848,
+    emissiveIntensity: 0.035,
+    transparent: true,
+    opacity: 0.86,
+    side: THREE.DoubleSide,
+  });
+  const antL = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.024, 0.74, 4, 2), legMat);
+  antL.rotation.set(0.2, -0.18, Math.PI / 5.5);
+  antL.position.set(0.2, 0.15, -0.06);
+  const antR = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.024, 0.74, 4, 2), legMat);
+  antR.rotation.set(0.2, 0.18, -Math.PI / 5.5);
+  antR.position.set(-0.2, 0.15, -0.06);
+
+  const broodMat = shellMat.clone();
+  broodMat.color = new THREE.Color(0x5ec4b8);
+  broodMat.opacity = 0.45;
+  broodMat.emissiveIntensity = 0.07;
+  const brood = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 6), broodMat);
+  brood.scale.set(0.95, 0.52, 0.92);
+  brood.position.set(0.04, -0.12, -0.32);
+
+  const tailSpine = new THREE.Mesh(new THREE.ConeGeometry(0.028, 0.15, 4), legMat);
+  tailSpine.rotation.x = -Math.PI / 2 - 0.24;
+  tailSpine.position.set(0, 0.1, -0.74);
+
+  grp.add(
+    valveL,
+    valveR,
+    dorsalStripe,
+    core,
+    rostrum,
+    eye,
+    cornea,
+    antL,
+    antR,
+    brood,
+    tailSpine
   );
-  ant.rotation.z = Math.PI / 6;
-  ant.position.set(0.2, 0.16, -0.1);
 
-  grp.add(body, core, eye, ant);
   grp.traverse((o) => {
     if ("isMesh" in o && o.isMesh && o.material && !Array.isArray(o.material)) {
       const m = /** @type {THREE.MeshStandardMaterial} */ (o.material);
       if (!m.blending || m.blending === THREE.NormalBlending) {
-        o.castShadow = true;
-        o.receiveShadow = true;
+        /** @type {THREE.Mesh} */ (o).castShadow = true;
+        /** @type {THREE.Mesh} */ (o).receiveShadow = true;
       }
-      o.frustumCulled = false;
+      /** @type {THREE.Mesh} */ (o).frustumCulled = false;
     }
   });
 
   grp.userData.baseScale = SCALE;
-  const hpHud = createHpStripSprite(1.75, 0.52, 2.72);
+  const hpHud = createHpStripSprite(1.78, 0.53, 2.74);
   grp.add(hpHud.sprite);
   grp.userData.hpHud = hpHud;
   grp.userData.idlePhase = Math.random() * Math.PI * 2;
   return grp;
 }
 
-/** Hydra riff — tethered capsule + dangling nematocyte bulbs. */
+/** Hydra riff — rooted pedal disk, tapered stalk, hypostome collar & dangling cnidocyte tentacles. */
 export function predatorHydraPodMesh() {
   const grp = new THREE.Group();
   const SCALE = 3.2;
   grp.scale.setScalar(SCALE);
 
-  const stemMat = new THREE.MeshStandardMaterial({
-    color: COLORS.hydraStem,
-    roughness: 0.6,
-    metalness: 0.06,
-    emissive: COLORS.hydraGlow,
+  const pedestalMat = new THREE.MeshStandardMaterial({
+    color: COLORS.hydraPedestal,
+    roughness: 0.68,
+    metalness: 0.035,
+    emissive: 0x1a3528,
     emissiveIntensity: 0.04,
   });
-  const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.15, 0.92, 8, 2), stemMat);
-  stem.rotation.z = 0.12;
-  stem.position.y = -0.2;
 
-  const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.44, 16, 12), stemMat.clone());
-  bulb.position.y = 0.48;
-  bulb.material.emissiveIntensity = 0.12;
+  const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.272, 0.068, 14, 1), pedestalMat);
+  foot.position.y = -0.334;
 
-  for (let i = 0; i < 3; i++) {
-    const ang = i * Math.PI * 0.72;
-    const hang = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), stemMat.clone());
-    hang.position.set(Math.cos(ang) * 0.52, -0.22, Math.sin(ang) * 0.52 + 0.04);
-    hang.material.color = new THREE.Color(0xfff7ff);
-    hang.material.emissive = new THREE.Color(0xaaeeff);
-    hang.material.emissiveIntensity = 0.18;
-    grp.add(hang);
+  const stalk = new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.14, 0.92, 10, 2), pedestalMat);
+  stalk.position.y = 0;
+  stalk.rotation.z = 0.11;
+
+  const stemGlow = new THREE.MeshStandardMaterial({
+    color: COLORS.hydraStem,
+    roughness: 0.54,
+    metalness: 0.05,
+    emissive: COLORS.hydraGlow,
+    emissiveIntensity: 0.07,
+    transparent: true,
+    opacity: 0.95,
+    side: THREE.DoubleSide,
+  });
+
+  const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.46, 18, 14), stemGlow.clone());
+  bulb.position.y = 0.52;
+  bulb.scale.set(0.94, 0.52, 0.94);
+
+  const collar = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.032, 8, 18), stemGlow.clone());
+  collar.rotation.x = Math.PI / 2 - 0.18;
+  collar.position.set(0, 0.32, -0.02);
+
+  const mouthPit = new THREE.Mesh(new THREE.CircleGeometry(0.09, 10), pedestalMat.clone());
+  mouthPit.material.color.setHex(0x0c1812);
+  mouthPit.material.emissiveIntensity = 0;
+  mouthPit.material.side = THREE.DoubleSide;
+  mouthPit.rotation.x = -Math.PI / 2 + 0.06;
+  mouthPit.position.set(0, 0.58, 0.06);
+
+  const tentTipMat = new THREE.MeshStandardMaterial({
+    color: COLORS.hydraNematocyst,
+    roughness: 0.38,
+    metalness: 0.05,
+    emissive: 0xaaffff,
+    emissiveIntensity: 0.35,
+    transparent: true,
+    opacity: 0.88,
+    side: THREE.DoubleSide,
+  });
+  const tentShaftMat = new THREE.MeshStandardMaterial({
+    color: COLORS.hydraTentacle,
+    roughness: 0.54,
+    metalness: 0.035,
+    emissive: COLORS.hydraGlow,
+    emissiveIntensity: 0.08,
+    side: THREE.DoubleSide,
+  });
+
+  for (let ti = 0; ti < 5; ti += 1) {
+    const beta = ti * Math.PI * 2 * 0.2 + 0.22;
+    const rx = Math.cos(beta) * 0.32;
+    const rz = Math.sin(beta) * 0.32 + 0.04;
+    const base = new THREE.Vector3(rx, 0.36, rz);
+    const mid = new THREE.Vector3(rx * 1.82, -0.12, rz * 1.72 + Math.sin(ti * 1.31) * 0.06);
+    const tip = new THREE.Vector3(rx * 2.2, -0.58, rz * 2.08);
+    const tCurve = new THREE.CatmullRomCurve3([base, mid, tip], false, "centripetal", 0.4);
+    const tentGeo = new THREE.TubeGeometry(tCurve, 32, 0.036, 5, false);
+    const tent = new THREE.Mesh(tentGeo, tentShaftMat);
+    grp.add(tent);
+
+    const tipPt = tCurve.getPointAt(1);
+    const sting = new THREE.Mesh(new THREE.SphereGeometry(0.095, 8, 6), tentTipMat.clone());
+    sting.scale.set(0.86, 0.72, 0.88);
+    sting.position.copy(tipPt);
+    grp.add(sting);
   }
 
-  grp.add(stem, bulb);
+  grp.add(foot, stalk, bulb, collar, mouthPit);
 
   grp.traverse((o) => {
     if ("isMesh" in o && o.isMesh && o.material) {
@@ -739,14 +1115,14 @@ export function predatorHydraPodMesh() {
   });
 
   grp.userData.baseScale = SCALE;
-  const hpHud = createHpStripSprite(2.2, 0.54, 2.92);
+  const hpHud = createHpStripSprite(2.25, 0.55, 2.94);
   grp.add(hpHud.sprite);
   grp.userData.hpHud = hpHud;
   grp.userData.idlePhase = Math.random() * Math.PI * 2;
   return grp;
 }
 
-/** Armoured predator riff — elongated plate + hinged tail spike + binocular eyes for weak-hit reads. */
+/** Notonectid nymph riff — hemelytron wing-pads & dorsal keel, jointed cerci, wet corneal glare. */
 export function predatorWaterScorpionTankMesh() {
   const grp = new THREE.Group();
   const SCALE = 4.2;
@@ -762,10 +1138,28 @@ export function predatorWaterScorpionTankMesh() {
   const eyeMat = carapace.clone();
   eyeMat.color = new THREE.Color(0x1a0810);
   eyeMat.emissive = new THREE.Color(0xfff3d9);
-  eyeMat.emissiveIntensity = 0.22;
+  eyeMat.emissiveIntensity = 0.26;
+  eyeMat.metalness = 0.08;
+
+  const corneaEye = new THREE.MeshStandardMaterial({
+    color: 0xe8f4ff,
+    roughness: 0.06,
+    metalness: 0.55,
+    transparent: true,
+    opacity: 0.32,
+    depthWrite: false,
+    emissive: 0xffeedd,
+    emissiveIntensity: 0.1,
+    side: THREE.DoubleSide,
+  });
 
   const accent = carapace.clone();
   accent.color = new THREE.Color(COLORS.scorpionAccent);
+
+  const wingPadMat = accent.clone();
+  wingPadMat.color = new THREE.Color(COLORS.scorpionWingPad);
+  wingPadMat.roughness = 0.72;
+  wingPadMat.metalness = 0.04;
 
   const thorax = new THREE.Mesh(new THREE.SphereGeometry(0.5, 16, 12), accent);
   thorax.scale.set(0.48, 0.34, 0.94);
@@ -775,9 +1169,29 @@ export function predatorWaterScorpionTankMesh() {
   abdomen.scale.set(0.94, 0.38, 1.92);
   abdomen.position.set(0, 0.1, -0.74);
 
-  const tail = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.98, 6, 1, false), accent);
-  tail.rotation.x = -Math.PI / 2 + 0.18;
-  tail.position.set(-0.02, 0.06, -1.94);
+  /** Dorsal keel / midline reinforcement (weak-tail target reads dorsally). */
+  const keelMat = accent.clone();
+  keelMat.color = new THREE.Color(COLORS.scorpionKeel);
+  keelMat.roughness = 0.64;
+  const keel = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.05, 1.92), keelMat);
+  keel.position.set(0.02, 0.275, -0.5);
+
+  /** Hardened ovate wing cushions on hemelytron. */
+  const wL = new THREE.Mesh(new THREE.SphereGeometry(0.34, 10, 8), wingPadMat);
+  wL.scale.set(0.92, 0.22, 1.06);
+  wL.rotation.z = -0.18;
+  wL.position.set(-0.52, 0.11, -0.28);
+  const wR = wL.clone();
+  wR.position.x *= -1;
+  wR.rotation.z *= -1;
+
+  const tailSeg = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.176, 0.58, 6, 1), accent);
+  tailSeg.rotation.x = -Math.PI / 2 + 0.36;
+  tailSeg.position.set(-0.02, 0.09, -1.74);
+
+  const tailTip = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.42, 6, 1, false), accent);
+  tailTip.rotation.x = -Math.PI / 2 + 0.2;
+  tailTip.position.set(-0.02, 0.07, -2.18);
 
   const raptorialL = new THREE.Mesh(new THREE.CapsuleGeometry(0.074, 0.42, 3, 6), accent);
   raptorialL.position.set(-0.34, -0.04, 0.95);
@@ -787,12 +1201,51 @@ export function predatorWaterScorpionTankMesh() {
   raptorialR.rotation.z *= -1;
   raptorialR.rotation.y *= -1;
 
-  const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.11, 8, 6), eyeMat);
+  /** Paddle-like rowing legs — exaggerated for chase-cam sillhouette. */
+  const paddMat = accent.clone();
+  paddMat.metalness = 0.04;
+  paddMat.roughness = 0.5;
+  const paddleL = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.03, 0.92), paddMat);
+  paddleL.position.set(-0.46, -0.02, -1.06);
+  paddleL.rotation.set(0.16, -0.22, -0.38);
+  const paddleR = paddleL.clone();
+  paddleR.position.x *= -1;
+  paddleR.rotation.y *= -1;
+  paddleR.rotation.z *= -1;
+
+  const eyeBase = new THREE.SphereGeometry(0.11, 8, 6);
+  const eyeL = new THREE.Mesh(eyeBase, eyeMat);
   eyeL.position.set(-0.18, 0.26, 1.14);
   const eyeR = eyeL.clone();
   eyeR.position.x = 0.18;
 
-  grp.add(thorax, abdomen, tail, raptorialL, raptorialR, eyeL, eyeR);
+  const corGeom = new THREE.SphereGeometry(0.112, 8, 6);
+  const cL = new THREE.Mesh(corGeom, corneaEye);
+  cL.scale.copy(eyeL.scale);
+  cL.position.copy(eyeL.position.clone().add(new THREE.Vector3(0, 0, 0.06)));
+  const cR = cL.clone();
+  cR.position.copy(eyeR.position.clone().add(new THREE.Vector3(0, 0, 0.06)));
+  /** Skip shadow from thin corneal shells — avoids murky blobs on the keel. */
+  cL.userData.skipEnemyShadow = true;
+  cR.userData.skipEnemyShadow = true;
+
+  grp.add(
+    thorax,
+    abdomen,
+    keel,
+    wL,
+    wR,
+    tailSeg,
+    tailTip,
+    raptorialL,
+    raptorialR,
+    paddleL,
+    paddleR,
+    eyeL,
+    eyeR,
+    cL,
+    cR
+  );
 
   const wakeRing = new THREE.Mesh(
     new THREE.RingGeometry(0.28, 0.44, 36),
@@ -815,6 +1268,10 @@ export function predatorWaterScorpionTankMesh() {
   grp.traverse((o) => {
     if ("isMesh" in o && o.isMesh) {
       if (o === wakeRing) return;
+      if (o.userData.skipEnemyShadow) {
+        o.frustumCulled = false;
+        return;
+      }
       o.castShadow = true;
       o.receiveShadow = true;
       o.frustumCulled = false;
