@@ -1,0 +1,156 @@
+# Pond sprint — `obstacles.predators` hostile kinds: see `normalizePredator` + `predatorMesh` in `src/trackLoader.js` / `sceneMeshes.js`
+
+metadata:
+  name: "Tutorial pond"
+  laps: 1
+
+spawn:
+  position: [0, 0.35, 5]
+  yawDeg: 180
+
+checkpoints:
+  - position: [0, 0.35, -25]
+    radius: 7
+  - position: [-28, 0.35, -45]
+    radius: 8
+  - position: [-45, 0.35, -10]
+    radius: 8
+  - position: [-15, 0.35, 25]
+    radius: 9
+
+obstacles:
+  lilies:
+    - position: [8, 0, -12]
+      radius: 2.4
+    - position: [-6, 0, -30]
+      radius: 2.8
+    - position: [-22, 0, -38]
+      radius: 2.2
+  bubbles:
+    - position: [12, 0, -22]
+      radius: 3.5
+      slowFactor: 0.55
+    - position: [-30, 0, -20]
+      radius: 3
+      slowFactor: 0.6
+  fish:
+    - position: [3, 0.2, -40]
+      length: 4
+      width: 1.1
+      height: 0.45
+      patrol:
+        - [3, -40]
+        - [18, -52]
+      speed: 4
+  racers:
+    - position: [-10, 0.35, -8]
+      hue: 32
+      speed: 3.5
+      turnSmooth: 0.08
+      path:
+        - [-10, -8]
+        - [-10, -28]
+        - [-26, -28]
+        - [-26, -8]
+    - position: [4, 0.35, -3]
+      hullHex: "#8b4cbf"
+      speed: 3.95
+      path:
+        - [4, -3]
+        - [16, -3]
+        - [16, -16]
+        - [6, -16]
+  ripples:
+    - position: [20, 0, -5]
+      radius: 7
+      slowFactor: 0.72
+      pulseSpeed: 1.2
+    - position: [-35, 0, 15]
+      radius: 8
+      slowFactor: 0.68
+      pulseSpeed: 0.9
+
+  predators:
+    # First straight from spawn (+Z row → −Z gates) — you should spot this immediately.
+    - type: mosquito_larva
+      position: [2, 0.4, -8]
+      damage: 7
+      hp: 2
+      chaseSpeed: 2.7
+      engageRadius: 22
+      biteIntervalSec: 1
+      venomSusceptibility: 1
+    # Heavier bite, needs another nip or two to dislodge
+    - type: mosquito_larva
+      position: [18, 0.39, -48]
+      damage: 14
+      hp: 3
+      radius: 0.68
+      biteIntervalSec: 1.25
+      engageRadius: 16
+      venomSusceptibility: 1.05
+    - type: mosquito_larva
+      position: [-38, 0.39, 5]
+      damage: 10
+      hp: 3
+      chaseSpeed: 3.35
+      engageRadius: 22
+      biteIntervalSec: 1.08
+    # Flatworm riff — toxin globs arc toward you; venom nibbles chew through epidermis.
+    - type: planarian_spitter
+      position: [-8.5, 0.41, -16]
+      hp: 3
+      engageRadius: 22
+      chaseSpeed: 1.92
+      biteIntervalSec: 1.4
+      venomSusceptibility: 1.12
+      rangedAttack:
+        damage: 8.5
+        cooldownSec: 2.08
+        maxRange: 16.5
+        projectileSpeed: 10.85
+        projectileRadius: 0.32
+        leadBias: 0.9
+    # Daphnid riff — frantic grazer analogue; brittle hull bursts to one nip.
+    - type: daphnid_charger
+      position: [6.4, 0.38, -22]
+      hp: 1
+      engageRadius: 26
+      chaseSpeed: 3.92
+      damage: 5.5
+    # Rooted polyp riff — arcs nematocyte globs; brush hull only for negligible melee bleed.
+    - type: hydra_pod
+      position: [22, 0.39, -28]
+      hp: 4
+      engageRadius: 24
+      chaseSpeed: 1.08
+      damage: 0
+      rangedAttack:
+        damage: 13.85
+        cooldownSec: 2.35
+        maxRange: 19.75
+        projectileSpeed: 9.82
+        projectileRadius: 0.48
+        leadBias: 0.74
+        colorHex: "#8af2ff"
+    # Larger nymph — plate ignores venom except paired eyes / tail hinge.
+    - type: waterscorpion_tank
+      position: [-42, 0.44, -24]
+      hp: 9
+      engageRadius: 24
+      chaseSpeed: 1.68
+      damage: 12.5
+      shellContactBleed: 5
+      venomSusceptibility: 0.72
+
+food:
+  - type: protozoa
+    position: [-4, 0.35, -8]
+  - type: nematode
+    position: [14, 0.35, -18]
+  - type: mosquito_larva
+    position: [-18, 0.35, -33]
+  - type: protozoa
+    position: [-32, 0.35, -44]
+  - type: nematode
+    position: [-40, 0.35, 5]

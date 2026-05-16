@@ -1,0 +1,174 @@
+metadata:
+  name: "Lily loop"
+  laps: 2
+
+spawn:
+  position: [0, 0.35, 8]
+  yawDeg: 180
+
+checkpoints:
+  - position: [0, 0.35, -35]
+    radius: 8
+  - position: [45, 0.35, -55]
+    radius: 9
+  - position: [70, 0.35, 0]
+    radius: 10
+  - position: [35, 0.35, 45]
+    radius: 9
+  - position: [-25, 0.35, 25]
+    radius: 9
+
+obstacles:
+  lilies:
+    - position: [-5, 0, -18]
+      radius: 3
+    - position: [22, 0, -42]
+      radius: 3.2
+    - position: [55, 0, -48]
+      radius: 2.8
+    - position: [62, 0, -22]
+      radius: 3.5
+    - position: [48, 0, 28]
+      radius: 2.9
+    - position: [5, 0, 52]
+      radius: 3.3
+    - position: [-30, 0, 38]
+      radius: 3
+    - position: [-40, 0, 12]
+      radius: 2.7
+    - position: [-12, 0, -44]
+      radius: 2.8
+  bubbles:
+    - position: [15, 0, -38]
+      radius: 5
+      slowFactor: 0.5
+    - position: [68, 0, -38]
+      radius: 4
+      slowFactor: 0.58
+    - position: [40, 0, 52]
+      radius: 6
+      slowFactor: 0.52
+  fish:
+    - position: [-8, 0.2, -28]
+      length: 5
+      width: 1.2
+      height: 0.5
+      patrol:
+        - [-8, -28]
+        - [35, -50]
+      speed: 5
+    - position: [30, 0.2, 12]
+      length: 4.5
+      width: 1
+      height: 0.4
+      patrol:
+        - [30, 12]
+        - [72, -5]
+      speed: 4.5
+  racers:
+    - position: [10, 0.35, 2]
+      speed: 4
+      turnSmooth: 0.06
+      path:
+        - [10, 2]
+        - [10, -32]
+        - [52, -32]
+        - [52, 38]
+        - [5, 38]
+        - [5, 2]
+    - position: [-18, 0.35, -12]
+      speed: 3.8
+      turnSmooth: 0.09
+      path:
+        - [-18, -12]
+        - [-18, -50]
+        - [72, -50]
+        - [72, 25]
+        - [-42, 25]
+        - [-42, -12]
+  ripples:
+    - position: [25, 0, -52]
+      radius: 10
+      slowFactor: 0.62
+      pulseSpeed: 1
+    - position: [-10, 0, 52]
+      radius: 11
+      slowFactor: 0.58
+      pulseSpeed: 1.35
+
+  predators:
+    - type: mosquito_larva
+      position: [32, 0.32, -40]
+      damage: 9
+      hp: 3
+      engageRadius: 20
+      chaseSpeed: 2.7
+      biteIntervalSec: 1.12
+      venomSusceptibility: 0.75
+    - type: mosquito_larva
+      position: [58, 0.32, -12]
+      damage: 11
+      hp: 4
+      radius: 0.72
+      engageRadius: 14
+      biteIntervalSec: 1.08
+      venomSusceptibility: 0.92
+    - type: mosquito_larva
+      position: [15, 0.32, 35]
+      damage: 7
+      hp: 2
+      chaseSpeed: 3
+      biteIntervalSec: 0.95
+    - type: mosquito_larva
+      position: [-42, 0.32, 10]
+      damage: 13
+      hp: 3
+      engageRadius: 24
+      biteIntervalSec: 1.05
+    - type: planarian_spitter
+      position: [-18, 0.41, -28]
+      hp: 3
+      engageRadius: 22
+      chaseSpeed: 1.85
+      venomSusceptibility: 1.05
+    - type: daphnid_charger
+      position: [48, 0.39, -20]
+      hp: 1
+      engageRadius: 28
+      chaseSpeed: 3.95
+    - type: hydra_pod
+      position: [60, 0.4, 6]
+      hp: 5
+      engageRadius: 26
+      chaseSpeed: 0.94
+      damage: 0
+      rangedAttack:
+        damage: 15
+        cooldownSec: 2.15
+        maxRange: 20.75
+        projectileSpeed: 10.85
+        projectileRadius: 0.5
+    - type: waterscorpion_tank
+      position: [-30, 0.44, 22]
+      hp: 12
+      engageRadius: 26
+      chaseSpeed: 1.82
+      damage: 15
+      shellContactBleed: 6
+      venomSusceptibility: 0.74
+
+food:
+  - type: protozoa
+    position: [28, 0.35, -22]
+  - type: nematode
+    position: [-20, 0.35, 8]
+  - type: mosquito_larva
+    position: [50, 0.35, -55]
+  - type: protozoa
+    position: [64, 0.35, 8]
+  - type: mosquito_larva
+    position: [40, 0.35, 22]
+  - type: nematode
+    position: [-8, 0.35, 38]
+  - type: protozoa
+    position: [-35, 0.35, 18]

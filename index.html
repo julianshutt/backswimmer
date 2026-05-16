@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Backswimmers — Pond Pursuit</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: #0a1628;
+        color: #e8f4ff;
+      }
+      #game {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
+      #hud {
+        position: fixed;
+        left: 12px;
+        top: 12px;
+        padding: 10px 14px;
+        background: rgba(8, 20, 40, 0.72);
+        border: 1px solid rgba(120, 200, 255, 0.25);
+        border-radius: 8px;
+        font-size: 13px;
+        line-height: 1.5;
+        pointer-events: none;
+        max-width: min(460px, 94vw);
+      }
+      #hud strong {
+        color: #7fd7ff;
+      }
+      #hud kbd {
+        display: inline-block;
+        padding: 0 5px;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        font-size: 11px;
+      }
+      #loading {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0a1628;
+        font-size: 18px;
+        z-index: 10;
+      }
+      #loading.hidden {
+        display: none;
+      }
+      #track-select {
+        position: fixed;
+        right: 12px;
+        top: 12px;
+        z-index: 5;
+      }
+      #track-select label {
+        font-size: 12px;
+        margin-right: 6px;
+        opacity: 0.85;
+      }
+      #track-select select {
+        background: rgba(8, 20, 40, 0.9);
+        color: #e8f4ff;
+        border: 1px solid rgba(120, 200, 255, 0.35);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 13px;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+          "js-yaml": "https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.mjs"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="loading">Loading track…</div>
+    <canvas id="game"></canvas>
+    <div id="hud">
+      <div><strong>Backswimmers</strong> — predatory pond skim (prototype)</div>
+      <div id="hud-stats"></div>
+      <div style="margin-top: 8px; opacity: 0.75; font-size: 11px">
+        <kbd>W</kbd>/<kbd>↑</kbd> stroke · <kbd>S</kbd>/<kbd>↓</kbd> reverse ·
+        <kbd>A</kbd><kbd>D</kbd>/<kbd>←</kbd><kbd>→</kbd> turn (in place OK) ·
+        <kbd>Space</kbd> venom cone (ranges ahead · closer hurts more) · <kbd>R</kbd> reset
+      </div>
+    </div>
+    <div id="track-select">
+      <label for="track-file">Course</label>
+      <select id="track-file" aria-label="Select course YAML">
+        <option value="tracks/tutorial.yaml">Tutorial pond</option>
+        <option value="tracks/lily_loop.yaml">Lily loop</option>
+      </select>
+    </div>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
