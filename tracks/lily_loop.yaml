@@ -96,6 +96,13 @@ obstacles:
       slowFactor: 0.58
       pulseSpeed: 1.35
 
+  daphnia:
+    - position: [40, 0.32, 6]
+      count: 12
+      spread: 5
+      fleeSpeed: 7.95
+      pointValuePer: 24
+
   predators:
     - type: mosquito_larva
       position: [32, 0.32, -40]

@@ -1,4 +1,4 @@
-# Pond sprint — `obstacles.predators` hostile kinds: see `normalizePredator` + `predatorMesh` in `src/trackLoader.js` / `sceneMeshes.js`
+# Pond sprint — `obstacles.predators` grazers vs `obstacles.daphnia` shallow shoals: see `normalizePredator` / `normalizeDaphniaFlocks` in `trackLoader.js` + meshes in `sceneMeshes.js`.
 
 metadata:
   name: "Tutorial pond"
@@ -69,6 +69,14 @@ obstacles:
       radius: 8
       slowFactor: 0.68
       pulseSpeed: 0.9
+
+  # Plankton shoals (`obstacles.daphnia` / `normalizeDaphniaFlocks`): flee underwater; splash converts to nibbles.
+  daphnia:
+    - position: [-4, 0.32, -36]
+      count: 10
+      spread: 4
+      fleeSpeed: 7.08
+      pointValuePer: 28
 
   predators:
     # First straight from spawn (+Z row → −Z gates) — you should spot this immediately.

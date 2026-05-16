@@ -25,12 +25,16 @@ const STONE_MATERIALS = Object.freeze([
  * One shared geometry, few materials — intentionally cheap draws.
  *
  * @param {object} track normalized merged track (`mergeTrackDefaults`)
- * @returns {{ root: THREE.Group }}
+ * @param {THREE.MeshStandardMaterial | null | undefined} texturedRockMat optional PBR material (textures applied per {@link rockTextures.js}); meshes clone it so UV rotation per rock still varies look.
+ * @returns {{ root: THREE.Group; xzDisks: { x: number; z: number; radius: number }[] }}
  */
-export function createPondStoneBed(track, seed = 0xde701) {
+export function createPondStoneBed(track, seed = 0xde701, texturedRockMat = null) {
   const rand = mulberry32(seed >>> 0);
   const root = new THREE.Group();
   root.name = "pondStoneBed";
+
+  /** @type {{ x: number; z: number; radius: number }[]} */
+  const xzDisks = [];
 
   const half = 258;
 
@@ -80,7 +84,10 @@ export function createPondStoneBed(track, seed = 0xde701) {
     const z = (rand() * 2 - 1) * (half - 46);
     if (clearance(x, z) < 3.1) continue;
 
-    const mesh = new THREE.Mesh(sharedDodecaGeom, STONE_MATERIALS[(placed % 997) % STONE_MATERIALS.length]);
+    const mesh = new THREE.Mesh(
+      sharedDodecaGeom,
+      texturedRockMat ?? STONE_MATERIALS[(placed % 997) % STONE_MATERIALS.length]
+    );
     const sx = THREE.MathUtils.lerp(1.05, 4.1, rand());
     const sy = THREE.MathUtils.lerp(0.42, 1.35, rand()) * sx;
     const sz = THREE.MathUtils.lerp(0.72, 1.18, rand()) * sx;
@@ -96,8 +103,14 @@ export function createPondStoneBed(track, seed = 0xde701) {
     mesh.castShadow = false;
     mesh.receiveShadow = false;
     root.add(mesh);
+
+    /**
+     * Tight footprint: unit dodeca in XZ seldom exceeds hypot(s×,s×); small margin only.
+     */
+    const xzR = Math.hypot(sx, sz) * 1.035 + 0.055;
+    xzDisks.push({ x, z, radius: xzR });
     placed += 1;
   }
 
-  return { root };
+  return { root, xzDisks };
 }

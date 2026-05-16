@@ -150,7 +150,7 @@ export function waterSurfaceDisplacementY(x, z, uTimeSeconds) {
 }
 
 /**
- * Stylised pond surface: slight mesh ripples + animated analytic normals, sun lighting, Fresnel rim, fog blend.
+ * Stylised pond surface: slight mesh ripples + animated analytic normals, sun lighting, Fresnel rim.
  * @param {{ colorMap: THREE.Texture; bumpMap?: THREE.Texture }} maps
  * @param {{ waterHex: number; deepHex: number; opacity?: number }} pal
  */
@@ -178,10 +178,6 @@ export function createAnimatedWaterMaterial(maps, pal) {
     uSpecStr: { value: 0.14 },
     uShininess: { value: 28 },
     uOpacity: { value: pal.opacity ?? 0.94 },
-    uFogColor: { value: new THREE.Vector3(0.49, 0.78, 0.91) },
-    uFogNear: { value: 70 },
-    uFogFar: { value: 240 },
-    uFogMix: { value: 0.48 },
   };
 
   const vertexShader = `
@@ -218,10 +214,6 @@ export function createAnimatedWaterMaterial(maps, pal) {
     uniform float uSpecStr;
     uniform float uShininess;
     uniform float uOpacity;
-    uniform vec3 uFogColor;
-    uniform float uFogNear;
-    uniform float uFogFar;
-    uniform float uFogMix;
 
     varying vec3 vWorldPos;
     varying vec2 vUv;
@@ -270,10 +262,6 @@ export function createAnimatedWaterMaterial(maps, pal) {
       vec3 lit = baseCol * (uAmbient + uSunColor * diff * uSunStr);
       lit += uSunColor * spec;
       lit += uRim * fr * 0.18;
-
-      float dist = length(vWorldPos - cameraPosition);
-      float fogF = smoothstep(uFogNear, uFogFar, dist) * uFogMix;
-      lit = mix(lit, uFogColor, fogF);
 
       gl_FragColor = vec4(lit, uOpacity);
     }

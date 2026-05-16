@@ -8,17 +8,116 @@ const scoreHud = /** @type {HTMLDivElement | null} */ (document.getElementById("
 const pauseGuide = /** @type {HTMLDivElement | null} */ (document.getElementById("pause-guide"));
 const deathOverlay = /** @type {HTMLDivElement | null} */ (document.getElementById("death-overlay"));
 const pauseOverlay = /** @type {HTMLDivElement | null} */ (document.getElementById("pause-overlay"));
-const select = /** @type {HTMLSelectElement} */ (document.getElementById("track-file"));
+
+const debugTrackBar = /** @type {HTMLDivElement | null} */ (document.getElementById("debug-track-bar"));
+const debugTrackSelect = /** @type {HTMLSelectElement | null} */ (
+  document.getElementById("debug-track-select")
+);
+
+const urlParams = new URLSearchParams(window.location.search);
+const DEBUG_MODE =
+  urlParams.has("debug") ||
+  urlParams.get("debug") === "1" ||
+  urlParams.get("debug") === "true";
+
+/** Canonical entry: procedural generator (`Game` reads this as `"procedural"`). */
+const DEFAULT_TRACK_URL = "procedural";
+
+/**
+ * Debug bar options — values are `Game` track URLs (`fetch` from page origin).
+ * Predator `type` strings match `predatorMesh` / `PRED_KIND_DEFAULTS` in `trackLoader.js`.
+ */
+const DEBUG_TRACK_ENTRIES = [
+  { label: "Procedural pond", value: "procedural" },
+  { label: "Tutorial (YAML)", value: "tracks/tutorial.yaml" },
+  { label: "Lily loop (YAML)", value: "tracks/lily_loop.yaml" },
+  { label: "Debug · mosquito_larva", value: "tracks/debug/arena_mosquito_larva.yaml" },
+  { label: "Debug · planarian_spitter", value: "tracks/debug/arena_planarian_spitter.yaml" },
+  { label: "Debug · daphnid_charger", value: "tracks/debug/arena_daphnid_charger.yaml" },
+  { label: "Debug · hydra_pod", value: "tracks/debug/arena_hydra_pod.yaml" },
+  { label: "Debug · waterscorpion_tank", value: "tracks/debug/arena_waterscorpion_tank.yaml" },
+];
+
+const splashInner = /** @type {HTMLDivElement | null} */ (document.getElementById("splash-inner"));
+const splashError = /** @type {HTMLParagraphElement | null} */ (
+  document.getElementById("splash-error")
+);
+const loadingBusy = /** @type {HTMLDivElement | null} */ (document.getElementById("loading-busy"));
+const loadingBusyMsg = /** @type {HTMLParagraphElement | null} */ (
+  document.getElementById("loading-busy-msg")
+);
 
 /** @type {Game | null} */
 let active = null;
 let restarting = false;
 
+function resetSplashOverlayUi() {
+  splashInner?.classList.remove("hidden");
+  splashError && (splashError.textContent = "");
+  loadingBusy?.classList.add("hidden");
+  if (loadingBusyMsg) loadingBusyMsg.textContent = "";
+}
+
+function showSplashLoadingPhase(url) {
+  splashInner?.classList.add("hidden");
+  loadingBusy?.classList.remove("hidden");
+  splashError && (splashError.textContent = "");
+  if (loadingBusyMsg) {
+    loadingBusyMsg.textContent =
+      url === "procedural" ? "Generating procedural pond…" : `Loading ${url}`;
+  }
+}
+
+function populateDebugTrackSelect() {
+  if (!debugTrackSelect) return;
+  debugTrackSelect.textContent = "";
+
+  const addGroup = (title, slice) => {
+    const og = document.createElement("optgroup");
+    og.label = title;
+    for (const e of slice) {
+      const o = document.createElement("option");
+      o.value = e.value;
+      o.textContent = e.label;
+      og.appendChild(o);
+    }
+    debugTrackSelect.appendChild(og);
+  };
+
+  addGroup("Shipped", DEBUG_TRACK_ENTRIES.slice(0, 3));
+  addGroup("Debug · one grazer each", DEBUG_TRACK_ENTRIES.slice(3));
+}
+
+function syncDebugTrackSelect(url) {
+  if (!DEBUG_MODE || !debugTrackSelect) return;
+  const ok = Array.from(debugTrackSelect.options).some((o) => o.value === url);
+  if (ok) debugTrackSelect.value = url;
+}
+
+function desiredStartTrackUrl() {
+  if (DEBUG_MODE && debugTrackSelect?.value) return debugTrackSelect.value;
+  return DEFAULT_TRACK_URL;
+}
+
+if (DEBUG_MODE) {
+  populateDebugTrackSelect();
+  debugTrackBar?.classList.remove("hidden");
+  debugTrackBar?.setAttribute("aria-hidden", "false");
+  debugTrackSelect?.addEventListener("change", () => {
+    if (debugTrackSelect?.value) attachTrack(debugTrackSelect.value);
+  });
+  const splashSub = document.querySelector("#splash-inner .splash-sub");
+  if (splashSub) {
+    splashSub.textContent =
+      "Debug mode: pick Track (lower-left), then Play — swap anytime to reload.";
+  }
+}
+
 async function attachTrack(url) {
   if (restarting) return;
   restarting = true;
   loading?.classList.remove("hidden");
-  loading.textContent = url === "procedural" ? "Generating procedural pond…" : `Loading ${url}`;
+  showSplashLoadingPhase(url);
 
   try {
     const prev = active;
@@ -29,26 +128,45 @@ async function attachTrack(url) {
     await game.init();
     active = game;
     loading?.classList.add("hidden");
+    resetSplashOverlayUi();
+    syncDebugTrackSelect(url);
   } catch (e) {
-    const msg =
+    const detail =
       typeof e?.message === "string"
         ? e.message
         : "Unknown error loading track (check DevTools Console).";
-    loading?.classList.remove("hidden");
-    loading.textContent =
-      `Could not load ${url}: ${msg} — open this folder via a local web server (` +
+    const msg =
+      `Could not load ${url}: ${detail} — open this folder via a local web server (` +
       `for example Python: python3 -m http.server) so fetch() works.`;
+    splashError && (splashError.textContent = msg);
+    loadingBusy?.classList.add("hidden");
+    splashInner?.classList.remove("hidden");
+    if (loadingBusyMsg) loadingBusyMsg.textContent = "";
+    loading?.classList.remove("hidden");
     console.error(e);
   }
 
   restarting = false;
 }
 
-select?.addEventListener("change", () => {
-  attachTrack(select.value);
+function startGameFromSplash() {
+  attachTrack(desiredStartTrackUrl());
+}
+
+document.getElementById("start-game")?.addEventListener("click", () => {
+  startGameFromSplash();
 });
 
-await attachTrack(select?.value || "tracks/tutorial.yaml");
+/** Title screen only: Enter starts the pond (ignored while generating or already playing). */
+document.addEventListener("keydown", (e) => {
+  if (e.code !== "Enter" && e.code !== "NumpadEnter") return;
+  if (active || restarting) return;
+  if (loading?.classList.contains("hidden")) return;
+  e.preventDefault();
+  startGameFromSplash();
+});
+
+resetSplashOverlayUi();
 
 const clock = new THREE.Clock();
 (function loop() {

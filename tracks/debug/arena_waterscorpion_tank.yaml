@@ -1,0 +1,22 @@
+# Debug — armoured grazer (weak spots + shell bleed).
+metadata:
+  name: "Debug — waterscorpion_tank"
+  laps: 6
+  courseRibbon: false
+
+spawn:
+  position: [0, 0.35, 16]
+  yawDeg: 180
+
+checkpoints:
+  - position: [0, 0.35, -24]
+    radius: 18
+  - position: [0, 0.35, 20]
+    radius: 16
+
+food: []
+
+obstacles:
+  predators:
+    - type: waterscorpion_tank
+      position: [0, 0.43, -14]

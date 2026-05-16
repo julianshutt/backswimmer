@@ -11,12 +11,14 @@ import {
   rivalGroup,
   boatGroup,
   foodMesh,
+  updateFoodPickupAnimations,
   preyNibbleMesh,
   advanceFish,
   advanceRival,
   predatorMesh,
   advanceMozzieTowardPlayer,
-  createHpStripSprite,
+  advanceMosquitoLarvaTowardPlayer,
+  daphniaFlockMemberMesh,
 } from "./sceneMeshes.js";
 import {
   createTiledWaterMaps,
@@ -24,28 +26,50 @@ import {
   createAnimatedWaterMaterial,
   waterSurfaceDisplacementY,
 } from "./waterFX.js";
-import { createPondReedField, updatePondReeds } from "./pondReeds.js";
+import { createPondReedField, updatePondReeds, playerConcealedInReeds } from "./pondReeds.js";
 import { createPondStoneBed } from "./pondBed.js";
+import { loadRockMaterialFromAmbientCG, ROCK_TEXTURE_PATHS } from "./rockTextures.js";
+import { loadSandFloorMaterial, SAND_TEXTURE_PATHS } from "./sandTextures.js";
+import { REED_GRASS_PATHS, loadReedGrassMaterial, cloneGrassMaterialForBroadLeaves } from "./reedTextures.js";
 import { createPondSkyDome } from "./skyDome.js";
 
 const PLAYER_RADIUS = 0.58;
+/** Shy Daphnia flee flocks stay inside this XZ box (matches reed / stone feel). */
+const DAPHNIA_POND_LIM = 232;
+/** Surface flecks brushing the keel — summed DPS capped so clouds read as abrasion, not instagib. */
+const DAPHNIA_HULL_SCRAPE_HP_PER_MEMBER_PER_S = 0.091;
+const DAPHNIA_HULL_SCRAPE_DPS_TOTAL_CAP = 2.55;
+/** Hull XZ vs stones — hugs rocks when still; modestly above {@link PLAYER_RADIUS} for keel/nose silhouette. */
+const PLAYER_STONE_HULL_R = 0.695;
+/** How much closer together hull + stone disks may settle than hard sum-of-radii (~cm). Caps so big rocks relax proportionally less. */
+const STONE_CONTACT_SEP_RELAX = 0.055;
+/** Max XZ slice length per stone-collision integration step (m); smaller = fewer tunnel escapes). */
+const STONE_XZ_MOVE_SLICE = 0.24;
+/** Enemy / AI glide subdivision vs stones + lily pads (same tunneling rationale as swimmer stones). */
+const ENEMY_SOLID_XZ_SLICE = 0.28;
+
+/** How much enemy hull may interpenetrate lily rims before radial push (~cm). */
+const LILY_CONTACT_SEP_RELAX = 0.042;
+
+/** Global swimmer locomotion pacing (top speed / accel / turn feel). */
+const PLAYER_LOCO_PACE = 1.1;
 
 const SPEED = {
-  baseMax: 10.8,
-  perFoodMax: 0.78,
-  absoluteMaxCap: 19.8,
-  baseAccel: 10.6,
-  turnRate: 2.85,
+  baseMax: 10.8 * PLAYER_LOCO_PACE,
+  perFoodMax: 0.78 * PLAYER_LOCO_PACE,
+  absoluteMaxCap: 19.8 * PLAYER_LOCO_PACE,
+  baseAccel: 10.6 * PLAYER_LOCO_PACE,
+  turnRate: 2.85 * 1.04,
   /** Sculling in place: A/D still swing yaw at this fraction of full moving turn. */
   inPlaceTurnFrac: 0.58,
-  waterDragLinear: 3.45,
+  waterDragLinear: 3.45 * 1.04,
   /** Max reverse speed as fraction of forward ceiling (still scales with food-boost etc.). */
   reverseMaxFrac: 0.4,
   reverseAccelFrac: 0.5,
 };
 
 /** Rowing cadence (~full cycles / s alternating legs). */
-const ROW_STROKE_HZ = 5.95;
+const ROW_STROKE_HZ = 5.95 * 1.045;
 
 /** Burst forward when hind legs sweep back (fraction of glide speed × speedNorm). */
 const ROW_KICK_BURST = 0.128;
@@ -87,6 +111,15 @@ const HARD_HIT = {
   foodLoss: 2,
   velocityFactor: 0.34,
   cooldownSec: 0.52,
+};
+
+/** Perched on a lily leaf (surface / “land”) — clumsy gait vs open water; not applied mid aerial leap/dip. */
+const LILY_TERRAIN = {
+  speedCapFrac: 0.068,
+  accelFrac: 0.14,
+  dragLinearMul: 7.15,
+  turnFrac: 0.18,
+  rowMoveFrac: 0.34,
 };
 
 const PLAYER_HP_MAX = 100;
@@ -220,13 +253,25 @@ const FIN_KICK_SPECS = {
 
 const ENEMY_BOLT_POOL = 56;
 /** Seconds before an uncollected grazing nibble winks out. */
-const NIBBLE_LIFETIME_SEC = 3.05;
+const NIBBLE_LIFETIME_SEC = 3.45;
 /** Final fraction of life used to ramp opacity toward zero. */
 const NIBBLE_FADE_FRAC = 0.52;
-/** Pickup overlap vs hull (XZ disk). */
+/** Pickup overlap vs hull (XZ disk) — manual crumbs. */
 const NIBBLE_PICKUP_RADIUS = 0.5;
+/** Grab radius for magnetized crumbs (generous silent pickup). */
+const NIBBLE_HOME_PICKUP_RADIUS = 1.18;
+/** Base homing speed toward swimmer (world units / sec); scaled by distance for a faster “zip” from afar. */
+const NIBBLE_HOME_SPEED = 78;
+/** At this XZ distance (m) homing hits full `NIBBLE_HOME_SPEED_FAR_MUL` boost. */
+const NIBBLE_HOME_DIST_RAMP_M = 19;
+/** Extra speed multiplier when far (1 = none); eases down to 1 as crumbs close in. */
+const NIBBLE_HOME_SPEED_FAR_MUL = 2.35;
+/** Minimum distance-scale multiplier (keeps last meters snappy). */
+const NIBBLE_HOME_SPEED_NEAR_MUL = 1.12;
+/** Share of burst crumbs that magnetize to the backswimmer; rest stay manual pickups. */
+const NIBBLE_AUTO_HOME_FRAC = 0.75;
 /** Max nibbles concurrently (oldest recycled). */
-const NIBBLE_DROP_CAP = 36;
+const NIBBLE_DROP_CAP = 220;
 /** Hull repair scales slightly with the venom chip that drew blood. */
 const NIBBLE_HEAL_BASE = 4.15;
 const NIBBLE_HEAL_PER_CHIP = 2.08;
@@ -261,6 +306,38 @@ const SCORE_TO_BEAT_LS_KEY = "Score to beat";
 
 /** Overhead hull strips never exceed this fraction of viewport height (close chase cam guard). */
 const HUD_SPRITE_MAX_VIEWPORT_HEIGHT_FRAC = 1 / 6;
+
+/** Surface dive → ballistic hop; <kbd>Space</kbd> while swimming. */
+const DIVE_JUMP = {
+  cooldown: 0.4,
+  dipDuration: 0.142,
+  /** Max excursion below nominal float plane during tuck. */
+  dipDepthMax: 0.42,
+  launchVy: 8.15,
+  gravity: 26.5,
+  /** Extra upward accel while stroking (<kbd>W</kbd>) in air — scales with leg drive phase. */
+  airStrokeLiftRate: 5.85,
+  maxUpwardVy: 11.8,
+  landSplashStrength: 2.25,
+  landSplashSpread: 6,
+};
+/** Upward Vy bump when releasing a charged fin kick mid-flight (by tier). */
+const FIN_KICK_AIR_VY = {
+  tap: 1.15,
+  partial: 1.72,
+  mega: 3.05,
+  tired: 1.42,
+  overhold: 0.62,
+};
+const PLAYER_LEAP_NONE = 0;
+const PLAYER_LEAP_DIP = 1;
+const PLAYER_LEAP_AIR = 2;
+
+/**
+ * Grazing predator HP overlays hide past this multiplier of approximate vertical frustum extent
+ * (measured at cam→swimmer depth) to declutter distant grazers.
+ */
+const PRED_HP_HUD_MAX_DISTANCE_SCREEN_HEIGHTS = 2;
 
 const DEATH_RED_BUILD_S = 0.38;
 const DEATH_TITLE_HOLD_BEFORE_SCORE_S = 0.94;
@@ -314,6 +391,8 @@ export class Game {
     /** Saliva strike timing. */
     this.venomMeleeCd = 0;
     this.pendingVenomBite = false;
+    /** One-shot dive/jump queued from <kbd>Space</kbd> (consumes like venom). */
+    this.pendingDiveLeap = false;
 
     /** Free forward fin strike — hold <kbd>F</kbd>, release with timing tiers. */
     this.strikeKickCd = 0;
@@ -330,6 +409,14 @@ export class Game {
 
     /** Last `time` argument to `update` (wake VFX chromaKick). */
     this._kickHudTime = 0;
+
+    /** One-frame samples for underway speed HUD (filled in player glide tick). */
+    this._hudSpeedCeilingFwd = SPEED.baseMax;
+    this._hudRevCeilAbs = SPEED.baseMax * SPEED.reverseMaxFrac;
+    this._hudEffectiveGlide = 0;
+    this._hudRowBoostLive = 1;
+    this._hudSignedSpeedSample = 0;
+    this._hudLilyPerchedNow = false;
 
     this.foodMeshes = [];
     /** @type {THREE.Object3D[]} */
@@ -365,9 +452,6 @@ export class Game {
     /** Remaining hull-hit flash accent for hud/wobble. */
     this.playerDmgFlashT = 0;
 
-    /** Cache key for swimmer overhead HP canvas. */
-    this._playerHudSnap = "";
-
     /** Ranged predator projectiles (pool of additive spheres). */
     /** @type {THREE.Mesh[]} */
     this.enemyBoltPool = [];
@@ -375,8 +459,12 @@ export class Game {
     this.enemyBolts = [];
 
     /** Ephemeral grazing nibbles spun off wounded predators (venom-drawn bleed). */
-    /** @type {{ mesh: THREE.Mesh; baseY: number; ttl: number; ttlMax: number; heal: number; bobPh: number }[]} */
+    /** @type {{ mesh: THREE.Mesh; baseY: number; ttl: number; ttlMax: number; heal: number; bobPh: number; autoHome: boolean; points?: number }[]} */
     this.nibbleDrops = [];
+
+    /** Swarms of docile Daphnia (flee + splash → nibbles); see `normalizeDaphniaFlocks` / `daphniaFlockMemberMesh`. */
+    /** @type {{ cfg: Record<string, number | number[]>; members: THREE.Group[] }[]} */
+    this.daphniaRuntime = [];
 
     this._predWeakScratch = new THREE.Vector3();
     this._predSpawnScratch = new THREE.Vector3();
@@ -409,6 +497,14 @@ export class Game {
     /** Author hull height above flat water plane; ripple offset added each frame to match shader. */
     this.playerFloatBaseY = 0.35;
 
+    /** 0 = swimming; 1 tuck under surface (short); 2 ballistic leap until landing. */
+    this.playerLeapPhase = PLAYER_LEAP_NONE;
+    this.playerLeapDipElapsed = 0;
+    this.playerLeapVy = 0;
+    /** Vy banked from mid-tuck fin releases; merged into launch. */
+    this.playerLeapAirKickBank = 0;
+    this.playerDiveCd = 0;
+
     /** Esc freezes sim; `_simFreezeTime` is refreshed from `main.js` while unpaused. */
     this.paused = false;
     /** Last running sim second from `THREE.Clock.getElapsedTime()` — updated by main loop whenever unpaused. */
@@ -418,6 +514,18 @@ export class Game {
     this.reedField = null;
     this._reedPlayerStartXZ = new THREE.Vector2();
 
+    /** Pond submerged stone disks for XZ blockage (filled in boot scene setup). */
+    /** @type {{ x: number; z: number; radius: number }[]} */
+    this.stoneXZDisks = [];
+    /** Shared pond stone PBR (AmbientCG); disposed manually — see skipDisposeInSceneTraverse */
+    /** @type {THREE.MeshStandardMaterial | null} */
+    this._rockPbrMaterial = null;
+    /** Shared reed blade grass PBR; same disposition as `_rockPbrMaterial`. */
+    /** @type {THREE.MeshStandardMaterial | null} */
+    this._reedGrassMaterial = null;
+    /** Broader tiling clone of reed grass textures for lily lathes (cloned texture objects). */
+    /** @type {THREE.MeshStandardMaterial | null} */
+    this._lilyGrassMaterial = null;
     /** Seconds since `playerDead` — phases death vignette → title → summary. */
     this._deathSeqTime = 0;
     /** One-shot best-score bookkeeping for ended runs (death or victory). */
@@ -427,8 +535,6 @@ export class Game {
 
     this._spriteClampBox = new THREE.Box3();
 
-    /** @type {THREE.Vector3 | null} */
-    this._playerHpHudBaseScale = null;
     /** @type {THREE.Vector3} */
     this._spriteClampCenter = new THREE.Vector3();
   }
@@ -471,6 +577,7 @@ export class Game {
     this._bestScoreSyncResult = null;
     this.venomMeleeCd = 0;
     this.pendingVenomBite = false;
+    this.pendingDiveLeap = false;
 
     this.strikeKickCd = 0;
     this.strikeKickCharging = false;
@@ -479,22 +586,76 @@ export class Game {
     this.strikeKickPoseT = 0;
     this.strikeKickPoseMax = STRIKE_KICK.poseSeconds;
 
+    this.playerLeapPhase = PLAYER_LEAP_NONE;
+    this.playerLeapDipElapsed = 0;
+    this.playerLeapVy = 0;
+    this.playerLeapAirKickBank = 0;
+    this.playerDiveCd = 0;
+
     if (this.venomSpitCone || this.venomBurstMesh) this.clearVenomBiteFx();
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x7ec8e9);
-    this.scene.fog = new THREE.Fog(0x7ec8e9, 70, 240);
+    this.scene.fog = null;
 
     const aspect = window.innerWidth / window.innerHeight || 1;
     this.camera = new THREE.PerspectiveCamera(62, aspect, 0.1, 450);
     this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio ?? 1, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio ?? 1, 1.75));
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.enabled = false;
 
-    this.buildWorld();
+    /** @type {THREE.MeshStandardMaterial | null} */
+    let rockPbrMat = null;
+    if (ROCK_TEXTURE_PATHS) {
+      try {
+        rockPbrMat = await loadRockMaterialFromAmbientCG(ROCK_TEXTURE_PATHS, this.renderer);
+        rockPbrMat.userData.skipDisposeInSceneTraverse = true;
+        this._rockPbrMaterial = rockPbrMat;
+      } catch (e) {
+        console.warn("[rockTextures] Falling back to flat stone colours:", e?.message ?? e);
+        this._rockPbrMaterial = null;
+      }
+    }
+
+    /** @type {THREE.MeshStandardMaterial | null} */
+    let sandFloorMat = null;
+    try {
+      sandFloorMat = await loadSandFloorMaterial(SAND_TEXTURE_PATHS, this.renderer, { uvRepeat: 38 });
+    } catch (e) {
+      console.warn("[sandTextures] Falling back to flat pond floor:", e?.message ?? e);
+    }
+
+    /** @type {THREE.MeshStandardMaterial | null} */
+    let reedGrassMat = null;
+    try {
+      reedGrassMat = await loadReedGrassMaterial(REED_GRASS_PATHS, this.renderer);
+      reedGrassMat.userData.skipDisposeInSceneTraverse = true;
+      this._reedGrassMaterial = reedGrassMat;
+    } catch (e) {
+      console.warn("[reedTextures] Falling back to flat reed colours:", e?.message ?? e);
+      this._reedGrassMaterial = null;
+    }
+
+    /** Lathe lily UVs stretch ~once across the pad — reuse grass maps with gentler repeat. */
+    /** @type {THREE.MeshStandardMaterial | null} */
+    let lilyPadGrassMat = null;
+    if (reedGrassMat) {
+      try {
+        lilyPadGrassMat = cloneGrassMaterialForBroadLeaves(reedGrassMat, this.renderer, {
+          repeatU: 4.4,
+          repeatV: 4.4,
+        });
+        lilyPadGrassMat.userData.skipDisposeInSceneTraverse = true;
+        this._lilyGrassMaterial = lilyPadGrassMat;
+      } catch (e) {
+        console.warn("[reedTextures] Lily grass clone failed, using reed tiling on pads:", e?.message ?? e);
+        this._lilyGrassMaterial = null;
+      }
+    }
+
+    this.buildWorld(rockPbrMat, sandFloorMat, reedGrassMat, lilyPadGrassMat);
     this._wakeTrailPrev.copy(this.pos);
     this._wakeTrailCarry = 0;
     window.addEventListener("resize", this.resize);
@@ -520,8 +681,27 @@ export class Game {
       this.scene.remove(obj);
     }
     this.disposeCleanup.length = 0;
+    if (this._rockPbrMaterial) {
+      this._rockPbrMaterial.dispose();
+      this._rockPbrMaterial = null;
+    }
+    if (this._lilyGrassMaterial) {
+      const m = this._lilyGrassMaterial;
+      m.map?.dispose?.();
+      m.normalMap?.dispose?.();
+      m.roughnessMap?.dispose?.();
+      m.aoMap?.dispose?.();
+      m.dispose();
+      this._lilyGrassMaterial = null;
+    }
+    if (this._reedGrassMaterial) {
+      this._reedGrassMaterial.dispose();
+      this._reedGrassMaterial = null;
+    }
+    this.daphniaRuntime.length = 0;
     this.foodMeshes.length = 0;
     this.predatorInst = [];
+    this.stoneXZDisks = [];
     if (this.renderer) this.renderer.dispose();
   }
 
@@ -529,7 +709,12 @@ export class Game {
     root.traverse((child) => {
       if ("geometry" in child && child.geometry) child.geometry.dispose();
       const m = "material" in child ? child.material : null;
-      if (m) (Array.isArray(m) ? m : [m]).forEach((mat) => mat?.dispose?.());
+      if (m) {
+        for (const mat of Array.isArray(m) ? m : [m]) {
+          if (!mat?.dispose || mat.userData?.skipDisposeInSceneTraverse) continue;
+          mat.dispose();
+        }
+      }
     });
   }
 
@@ -568,6 +753,7 @@ export class Game {
         this.keys.left = false;
         this.keys.right = false;
         this.pendingVenomBite = false;
+        this.pendingDiveLeap = false;
         this.strikeKickCharging = false;
         this.strikeChargeT = 0;
         this.finKickKeyHeld = false;
@@ -575,6 +761,10 @@ export class Game {
       e.preventDefault();
     }
     if (e.code === "Space" && down && !e.repeat) {
+      this.pendingDiveLeap = true;
+      e.preventDefault();
+    }
+    if (e.code === "KeyE" && down && !e.repeat) {
       this.pendingVenomBite = true;
       e.preventDefault();
     }
@@ -623,6 +813,7 @@ export class Game {
     this.playerDead = false;
     this.venomMeleeCd = 0;
     this.pendingVenomBite = false;
+    this.pendingDiveLeap = false;
 
     this.strikeKickCd = 0;
     this.strikeKickCharging = false;
@@ -630,6 +821,13 @@ export class Game {
     this.finKickKeyHeld = false;
     this.strikeKickPoseT = 0;
     this.strikeKickPoseMax = STRIKE_KICK.poseSeconds;
+
+    this.playerLeapPhase = PLAYER_LEAP_NONE;
+    this.playerLeapDipElapsed = 0;
+    this.playerLeapVy = 0;
+    this.playerLeapAirKickBank = 0;
+    this.playerDiveCd = 0;
+
     this.megaKickChromT = 0;
     if (this.megaKickChromGroup) this.megaKickChromGroup.visible = false;
 
@@ -638,9 +836,9 @@ export class Game {
 
     this.clearVenomBiteFx();
     this.playerDmgFlashT = 0;
-    this._playerHudSnap = "";
     this.releaseEnemyRangedBolts();
     this.clearPreyNibbles();
+    this.rebuildDaphniaFlocksFromTrack();
     let i = 0;
     for (const fd of this.track.food) {
       fd.active = true;
@@ -672,6 +870,7 @@ export class Game {
       }
 
       const h = grp.userData.hpHud;
+      if (h?.sprite) h.sprite.visible = true;
       if (h?.draw && live.hpMax > 0) {
         h.draw(1, 0, 0);
         grp.userData._predHudSnap = "1.0000:0.000:0.000";
@@ -679,7 +878,16 @@ export class Game {
     }
   }
 
-  buildWorld() {
+  /** @param {THREE.MeshStandardMaterial | null | undefined} [rockPbrMat] Shared textured rock material, or omit for procedural greys */
+  /** @param {THREE.MeshStandardMaterial | null | undefined} [sandFloorMat] Textured bottom plane under water; falls back to flat colour */
+  /** @param {THREE.MeshStandardMaterial | null | undefined} [reedGrassMat] One shared reed blade PBR; falls back to per-cluster flat colours */
+  /** @param {THREE.MeshStandardMaterial | null | undefined} [lilyPadGrassMat] Optional clone with broader grass tiling for lathe pads */
+  buildWorld(
+    rockPbrMat = undefined,
+    sandFloorMat = undefined,
+    reedGrassMat = undefined,
+    lilyPadGrassMat = undefined
+  ) {
     const ambient = new THREE.HemisphereLight(0xffffff, 0x224466, 0.55);
     this.scene.add(ambient);
 
@@ -691,7 +899,7 @@ export class Game {
 
     const sun = new THREE.DirectionalLight(0xfff3dd, 1.08);
     sun.position.set(-40, 90, -20);
-    sun.castShadow = true;
+    sun.castShadow = false;
     const cam = sun.shadow.camera;
     cam.left = cam.bottom = -130;
     cam.right = cam.top = 130;
@@ -720,7 +928,8 @@ export class Game {
 
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(520, 520),
-      new THREE.MeshStandardMaterial({ color: COLORS.waterDeep, roughness: 1, metalness: 0 })
+      sandFloorMat ??
+        new THREE.MeshStandardMaterial({ color: COLORS.waterDeep, roughness: 1, metalness: 0 })
     );
     floor.rotation.x = Math.PI / 2;
     floor.position.y = -2;
@@ -728,10 +937,10 @@ export class Game {
     this.scene.add(floor);
     this.disposeCleanup.push(floor);
 
-    const stoneBed = createPondStoneBed(this.track, reedSeed ^ 0x5b076e7);
+    const stoneBed = createPondStoneBed(this.track, reedSeed ^ 0x5b076e7, rockPbrMat ?? null);
     this.scene.add(stoneBed.root);
     this.disposeCleanup.push(stoneBed.root);
-
+    this.stoneXZDisks = stoneBed.xzDisks ?? [];
     const water = new THREE.Mesh(new THREE.PlaneGeometry(520, 520, 96, 96), waterMat);
     water.rotation.x = -Math.PI / 2;
     water.receiveShadow = true;
@@ -744,7 +953,7 @@ export class Game {
     }
     this.waterWakePool = new SurfaceWakePool(this.scene, 72);
 
-    this.reedField = createPondReedField(this.track, reedSeed);
+    this.reedField = createPondReedField(this.track, reedSeed, reedGrassMat ?? null);
     this.scene.add(this.reedField.root);
     this.disposeCleanup.push(this.reedField.root);
 
@@ -756,20 +965,27 @@ export class Game {
     this.disposeCleanup.push(grid);
 
     const cpts = this.track.checkpoints ?? [];
-    this.courseRibbonObj = buildCourseRibbon(cpts, 0.15);
-    if (this.courseRibbonObj?.mesh) {
-      this.scene.add(this.courseRibbonObj.mesh);
-      this.disposeCleanup.push(this.courseRibbonObj.mesh);
-    }
+    const ribbonOn = this.track.metadata?.courseRibbon !== false;
 
-    this.checkpointBuoys = buildCheckpointMarkers(cpts);
-    for (const buoy of this.checkpointBuoys) {
-      this.scene.add(buoy.group);
-      this.disposeCleanup.push(buoy.group);
+    if (ribbonOn && cpts.length >= 2) {
+      this.courseRibbonObj = buildCourseRibbon(cpts, 0.15);
+      if (this.courseRibbonObj?.mesh) {
+        this.scene.add(this.courseRibbonObj.mesh);
+        this.disposeCleanup.push(this.courseRibbonObj.mesh);
+      }
+
+      this.checkpointBuoys = buildCheckpointMarkers(cpts);
+      for (const buoy of this.checkpointBuoys) {
+        this.scene.add(buoy.group);
+        this.disposeCleanup.push(buoy.group);
+      }
+    } else {
+      this.courseRibbonObj = null;
+      this.checkpointBuoys = [];
     }
 
     for (const l of this.track.lilies) {
-      const g = lilyGroup(l.radius);
+      const g = lilyGroup(l.radius, lilyPadGrassMat ?? reedGrassMat ?? null);
       g.position.set(l.position[0], l.y || 0.02, l.position[1]);
       g.castShadow = true;
       g.receiveShadow = true;
@@ -870,6 +1086,8 @@ export class Game {
       }
     }
 
+    this.rebuildDaphniaFlocksFromTrack();
+
     const player = boatGroup();
     player.position.copy(this.pos);
     this.playerMesh = player;
@@ -878,35 +1096,8 @@ export class Game {
 
     this.ensureVenomBiteMeshes(player);
     this.ensureMegaKickChromBurst();
-    this.ensurePlayerHpBar(player);
 
     this.ensureEnemyBoltPool();
-  }
-
-  /** Overhead hull strip (canvas sprite parented above your mesh). */
-  ensurePlayerHpBar(player) {
-    if (this.playerHpHud || !player) return;
-    const h = createHpStripSprite(2.32, 0.5, 2.74);
-    this.playerHpHud = h;
-    player.add(h.sprite);
-    this._playerHpHudBaseScale = h.sprite.scale.clone();
-  }
-
-  /** Repaints strip when vitality or hull-hit flash envelope changes. */
-  refreshPlayerHudStrip() {
-    if (!this.track || !this.playerHpHud?.draw) return;
-    if (this.playerDead) {
-      if (this.playerHpHud.sprite) this.playerHpHud.sprite.visible = false;
-      return;
-    }
-    if (this.playerHpHud.sprite) this.playerHpHud.sprite.visible = true;
-    const r = THREE.MathUtils.clamp(this.health / Math.max(this.healthMax, 1e-5), 0, 1);
-    const dmgF = THREE.MathUtils.clamp(1 - r, 0, 1);
-    const pulse = THREE.MathUtils.clamp(this.playerDmgFlashT / 0.5, 0, 1);
-    const snap = `${this.health.toFixed(2)}|${pulse.toFixed(2)}|${dmgF.toFixed(3)}`;
-    if (snap === this._playerHudSnap) return;
-    this._playerHudSnap = snap;
-    this.playerHpHud.draw(r, dmgF, pulse);
   }
 
   /** Child cone on hull + additive burst in world space — created once after player mesh exists. */
@@ -1126,7 +1317,7 @@ export class Game {
     return true;
   }
 
-  advanceEnemyRangedBolts(dt, /** @type {number} */ playerX, /** @type {number} */ playerZ) {
+  advanceEnemyRangedBolts(dt, /** @type {number} */ playerX, /** @type {number} */ playerZ, playerMarshConcealed = false) {
     if (!dt || dt <= 0) return;
     for (let i = this.enemyBolts.length - 1; i >= 0; i -= 1) {
       const bolt = this.enemyBolts[i];
@@ -1142,6 +1333,7 @@ export class Game {
         rdx * rdx + rdz * rdz < rr * rr &&
         !this.finished &&
         !this.playerDead &&
+        !playerMarshConcealed &&
         bolt.dmg > 0
       ) {
         this.applyParasiteBleed(bolt.dmg);
@@ -1172,32 +1364,71 @@ export class Game {
     this.nibbleDrops.length = 0;
   }
 
-  /** Hemolymph nibbles peeled off grazing prey whenever venom actually draws ichor (`hpNow` drops). */
-  spawnPreyNibble(wx, wy, wz, healAmount) {
-    if (!this.scene) return;
+  /** Hemoglobin micro-crumbs: split bleed into many pickups; magnetized subset homes on the swimmer. */
+  /**
+   * @param {number} totalHeal
+   * @param {number} [totalPoints]
+   * @param {{ nibbleAutoHomeFrac?: number }} [opts]
+   */
+  spawnPreyNibbleBurst(cx, cy, cz, totalHeal, totalPoints, opts) {
+    if (!this.scene || !(totalHeal > 1e-6)) return;
 
-    while (this.nibbleDrops.length >= NIBBLE_DROP_CAP) {
+    const count = THREE.MathUtils.clamp(Math.round(10 + totalHeal * 0.92), 12, 30);
+    while (this.nibbleDrops.length + count > NIBBLE_DROP_CAP) {
       const stale = this.nibbleDrops.shift();
       if (stale?.mesh) this.disposePreyNibble(stale.mesh);
     }
 
-    const mesh = preyNibbleMesh();
-    mesh.position.set(wx, wy, wz);
-    mesh.scale.setScalar(0.88 + Math.random() * 0.18);
-    this.scene.add(mesh);
+    const spread = 2.35;
+    const eachHeal = totalHeal / count;
+    const ptsRaw = typeof totalPoints === "number" && Number.isFinite(totalPoints) ? totalPoints : 0;
+    const totalPts = ptsRaw > 0 ? ptsRaw : 0;
+    const eachPt = totalPts / count;
 
-    const ttlMax = NIBBLE_LIFETIME_SEC;
-    const mat = /** @type {THREE.MeshStandardMaterial} */ (mesh.material);
-    mat.opacity = 1;
+    const homeFrac =
+      typeof opts?.nibbleAutoHomeFrac === "number" &&
+      Number.isFinite(opts.nibbleAutoHomeFrac) &&
+      opts.nibbleAutoHomeFrac >= 0 &&
+      opts.nibbleAutoHomeFrac <= 1
+        ? opts.nibbleAutoHomeFrac
+        : NIBBLE_AUTO_HOME_FRAC;
 
-    this.nibbleDrops.push({
-      mesh,
-      baseY: mesh.position.y,
-      ttl: ttlMax,
-      ttlMax,
-      heal: healAmount,
-      bobPh: Math.random() * Math.PI * 2,
-    });
+    for (let i = 0; i < count; i += 1) {
+      const heal = i === count - 1 ? totalHeal - eachHeal * (count - 1) : eachHeal;
+      const points = i === count - 1 ? totalPts - eachPt * (count - 1) : eachPt;
+
+      if (!(heal > 1e-6)) continue;
+
+      const autoHome = Math.random() < homeFrac;
+      const vScale = 0.44 + Math.random() * 0.2;
+      const mesh = preyNibbleMesh(vScale);
+      mesh.position.set(
+        cx + (Math.random() - 0.5) * spread,
+        cy + (Math.random() - 0.5) * 0.12,
+        cz + (Math.random() - 0.5) * spread
+      );
+
+      const mat = /** @type {THREE.MeshStandardMaterial} */ (mesh.material);
+      if (autoHome) {
+        mat.emissiveIntensity = 0.78;
+      }
+      mesh.rotation.x += Math.random() * 0.6;
+      mesh.rotation.z += Math.random() * Math.PI;
+
+      this.scene.add(mesh);
+      mat.opacity = 1;
+
+      this.nibbleDrops.push({
+        mesh,
+        baseY: mesh.position.y,
+        ttl: NIBBLE_LIFETIME_SEC,
+        ttlMax: NIBBLE_LIFETIME_SEC,
+        heal,
+        bobPh: Math.random() * Math.PI * 2,
+        autoHome,
+        points,
+      });
+    }
   }
 
   updatePreyNibbles(dt, timeSec) {
@@ -1211,10 +1442,29 @@ export class Game {
       const mesh = n.mesh;
 
       n.ttl -= dt;
-      const bob = Math.sin(timeSec * 9.65 + n.bobPh) * 0.07;
+
+      if (n.autoHome && !this.playerDead && !this.finished) {
+        const dx = px - mesh.position.x;
+        const dz = pz - mesh.position.z;
+        const dlen = Math.hypot(dx, dz);
+        if (dlen > 1e-4) {
+          const u = THREE.MathUtils.clamp(dlen / NIBBLE_HOME_DIST_RAMP_M, 0, 1);
+          const urg = THREE.MathUtils.lerp(
+            NIBBLE_HOME_SPEED_NEAR_MUL,
+            NIBBLE_HOME_SPEED_FAR_MUL,
+            THREE.MathUtils.smoothstep(u, 0.02, 0.995)
+          );
+          const step = Math.min(NIBBLE_HOME_SPEED * urg * dt, dlen);
+          mesh.position.x += (dx / dlen) * step;
+          mesh.position.z += (dz / dlen) * step;
+        }
+      }
+
+      const bobAmp = n.autoHome ? 0.034 : 0.078;
+      const bob = Math.sin(timeSec * 9.65 + n.bobPh) * bobAmp;
       mesh.position.y = n.baseY + bob;
-      mesh.rotation.x += dt * 1.25;
-      mesh.rotation.y += dt * 0.95;
+      mesh.rotation.x += dt * (n.autoHome ? 2.35 : 1.25);
+      mesh.rotation.y += dt * (n.autoHome ? 1.65 : 0.95);
 
       const fadeW = Math.max(n.ttlMax * NIBBLE_FADE_FRAC, 1e-3);
       const mat = /** @type {THREE.MeshStandardMaterial | undefined} */ (mesh.material);
@@ -1225,18 +1475,19 @@ export class Game {
       }
 
       if (!this.playerDead && !this.finished && n.heal > 0) {
+        const pickR = n.autoHome ? NIBBLE_HOME_PICKUP_RADIUS : NIBBLE_PICKUP_RADIUS;
         if (
-          this.collideDisk(
-            px,
-            pz,
-            mesh.position.x,
-            mesh.position.z,
-            PLAYER_RADIUS,
-            NIBBLE_PICKUP_RADIUS
-          )
+          this.collideDisk(px, pz, mesh.position.x, mesh.position.z, PLAYER_RADIUS, pickR)
         ) {
+          const nibPts = typeof n.points === "number" && Number.isFinite(n.points) ? n.points : 0;
+          if (nibPts > 0) {
+            this.points += nibPts;
+            this.venom = Math.min(
+              this.venomMax,
+              this.venom + THREE.MathUtils.clamp(nibPts * 0.35, 0, 22)
+            );
+          }
           this.health = Math.min(this.healthMax, this.health + n.heal);
-          this._playerHudSnap = "";
           this.disposePreyNibble(mesh);
           this.nibbleDrops.splice(i, 1);
           continue;
@@ -1246,6 +1497,261 @@ export class Game {
       if (n.ttl <= 0) {
         this.disposePreyNibble(mesh);
         this.nibbleDrops.splice(i, 1);
+      }
+    }
+  }
+
+  disposeDaphniaFlocksRuntime() {
+    for (const { members } of this.daphniaRuntime) {
+      for (const g of members) {
+        const ix = this.disposeCleanup.indexOf(g);
+        if (ix >= 0) this.disposeCleanup.splice(ix, 1);
+        g.removeFromParent();
+        this.disposeObject(g);
+      }
+    }
+    this.daphniaRuntime.length = 0;
+  }
+
+  removeDaphniaFlockMemberFromScene(g) {
+    const ix = this.disposeCleanup.indexOf(g);
+    if (ix >= 0) this.disposeCleanup.splice(ix, 1);
+    g.removeFromParent();
+    this.disposeObject(g);
+  }
+
+  rebuildDaphniaFlocksFromTrack() {
+    this.disposeDaphniaFlocksRuntime();
+    /** @type {any[]} */
+    const flocks = Array.isArray(this.track?.daphniaFlocks) ? this.track.daphniaFlocks : [];
+    if (!flocks.length || !this.scene) return;
+
+    for (const fk of flocks) {
+      const cx = fk.position?.[0] ?? 0;
+      const baseY =
+        fk.position?.[1] != null && Number.isFinite(fk.position[1])
+          ? fk.position[1]
+          : this.playerFloatBaseY;
+      const cz = fk.position?.[2] ?? 0;
+      const cnt = Math.max(1, Math.round(Number(fk.count) || 8));
+      const spread = Math.max(0.2, Number(fk.spread) || 3.2);
+
+      /** @type {THREE.Group[]} */
+      const members = [];
+      for (let i = 0; i < cnt; i += 1) {
+        const g = daphniaFlockMemberMesh();
+        const ang = Math.random() * Math.PI * 2;
+        const rr = spread * Math.sqrt(Math.random());
+        let x = cx + Math.cos(ang) * rr;
+        let z = cz + Math.sin(ang) * rr;
+        x = THREE.MathUtils.clamp(x, -DAPHNIA_POND_LIM, DAPHNIA_POND_LIM);
+        z = THREE.MathUtils.clamp(z, -DAPHNIA_POND_LIM, DAPHNIA_POND_LIM);
+        g.position.set(x, baseY, z);
+        g.rotation.y = Math.random() * Math.PI * 2;
+        g.userData.daphnia = {
+          alive: true,
+          cfg: fk,
+          jitter: Math.random() * Math.PI * 2,
+        };
+        this.scene.add(g);
+        this.disposeCleanup.push(g);
+        members.push(g);
+      }
+      this.daphniaRuntime.push({ cfg: fk, members });
+    }
+  }
+
+  updateDaphniaFlocks(dt, time) {
+    if (!this.track || dt <= 0 || this.playerDead) return;
+
+    const px = this.pos.x;
+    const pz = this.pos.z;
+    const fleeAirMul = this.playerLeapPhase === PLAYER_LEAP_AIR ? 0.38 : 1;
+    const tallyDaphniaScrape = !this.finished && this.playerLeapPhase === PLAYER_LEAP_NONE;
+    let daphniaHullTouchCount = 0;
+
+    for (const flock of this.daphniaRuntime) {
+      const cfg = flock.cfg;
+
+      /** @type {THREE.Group[]} */
+      const alive = flock.members.filter((m) => m.userData.daphnia?.alive);
+      if (!alive.length) continue;
+
+      let cx = 0;
+      let cz = 0;
+      for (const m of alive) {
+        cx += m.position.x;
+        cz += m.position.z;
+      }
+      cx /= alive.length;
+      cz /= alive.length;
+
+      const scareSq = cfg.scareRadius * cfg.scareRadius;
+
+      /** Per-flock hull body radius reused for cohesion + abrasion tests. */
+      const fhull = typeof cfg.bodyRadius === "number" && Number.isFinite(cfg.bodyRadius) ? cfg.bodyRadius : 0.34;
+
+      const coh = cfg.cohesionWeight * 0.09;
+      const sepR = cfg.separationRadius;
+      const sepSq = sepR ** 2;
+      const sepW = cfg.separationWeight * 1.08;
+
+      for (const m of alive) {
+        const ox = m.position.x;
+        const oz = m.position.z;
+        const mx = ox;
+        const mz = oz;
+
+        let dx = 0;
+        let dz = 0;
+
+        const ux = mx - px;
+        const uz = mz - pz;
+        const udsq = ux * ux + uz * uz;
+        if (udsq > 1e-6) {
+          const inv = 1 / Math.sqrt(udsq);
+          let fleeW = udsq < scareSq ? 3.5 : 1.92;
+          if (udsq < (fhull + PLAYER_RADIUS) ** 2) fleeW *= 1.85;
+          dx += -ux * inv * fleeW * fleeAirMul;
+          dz += -uz * inv * fleeW * fleeAirMul;
+        }
+
+        dx += (cx - mx) * coh;
+        dz += (cz - mz) * coh;
+
+        for (const o of alive) {
+          if (o === m) continue;
+          const sx = mx - o.position.x;
+          const sz = mz - o.position.z;
+          const sdsq = sx * sx + sz * sz;
+          if (sdsq > 1e-7 && sdsq < sepSq) {
+            const sl = Math.sqrt(sdsq);
+            const push = ((sepR - sl) / sepR) ** 1.35;
+            dx += (sx / sl) * push * sepW;
+            dz += (sz / sl) * push * sepW;
+          }
+        }
+
+        const len = Math.hypot(dx, dz);
+        if (len > 1e-5) {
+          const step = Math.min(cfg.fleeSpeed * dt, len * 1.08);
+          const nx = dx / len;
+          const nz = dz / len;
+          m.position.x = ox;
+          m.position.z = oz;
+          this.integrateEnemyXZAgainstPondSolids(m.position, nx * step, nz * step, fhull);
+          m.rotation.y = -Math.atan2(nx, nz);
+        }
+
+        m.position.x = THREE.MathUtils.clamp(m.position.x, -DAPHNIA_POND_LIM, DAPHNIA_POND_LIM);
+        m.position.z = THREE.MathUtils.clamp(m.position.z, -DAPHNIA_POND_LIM, DAPHNIA_POND_LIM);
+
+        const swell = waterSurfaceDisplacementY(m.position.x, m.position.z, time);
+        const base =
+          flock.cfg.position?.[1] != null && Number.isFinite(flock.cfg.position[1])
+            ? flock.cfg.position[1]
+            : this.playerFloatBaseY;
+        m.position.y = THREE.MathUtils.lerp(base, this.playerFloatBaseY + swell, 0.86);
+
+        const j = typeof m.userData.daphnia.jitter === "number" ? m.userData.daphnia.jitter : 0;
+        m.rotation.z = Math.sin(time * 13.25 + j) * 0.144;
+
+        if (
+          tallyDaphniaScrape &&
+          this.collideDisk(px, pz, m.position.x, m.position.z, PLAYER_RADIUS, fhull)
+        ) {
+          daphniaHullTouchCount += 1;
+        }
+      }
+    }
+
+    if (daphniaHullTouchCount > 0 && tallyDaphniaScrape) {
+      const dps = Math.min(
+        daphniaHullTouchCount * DAPHNIA_HULL_SCRAPE_HP_PER_MEMBER_PER_S,
+        DAPHNIA_HULL_SCRAPE_DPS_TOTAL_CAP
+      );
+      const loss = dps * dt;
+      if (loss > 0 && Number.isFinite(loss)) {
+        this.health -= loss;
+        this.playerDmgFlashT = Math.max(
+          this.playerDmgFlashT,
+          THREE.MathUtils.clamp(loss * 22, 0.04, 0.14)
+        );
+        if (this.health <= 0) {
+          this.health = 0;
+          this.playerDead = true;
+          this._deathSeqTime = 0;
+          this._bestScoreSyncedThisRun = false;
+          this._bestScoreSyncResult = null;
+          this.speed *= 0.22;
+          this.winReason = null;
+        }
+      }
+    }
+  }
+
+  squashDaphniaWithSplash(px, pz) {
+    if (!this.daphniaRuntime.length || !this.scene) return;
+
+    for (const flock of this.daphniaRuntime) {
+      const cfg = flock.cfg;
+      const rsq = cfg.splashHitRadius ** 2;
+      const heal = cfg.nibbleHealPer;
+      const pts = cfg.pointValuePer ?? 0;
+
+      for (const m of flock.members) {
+        const du = m.userData.daphnia;
+        if (!du?.alive) continue;
+        const dx = m.position.x - px;
+        const dz = m.position.z - pz;
+        if (dx * dx + dz * dz > rsq) continue;
+        const sy = m.position.y + 0.07;
+        this.spawnPreyNibbleBurst(m.position.x, sy, m.position.z, heal, pts, {
+          nibbleAutoHomeFrac: 0.58,
+        });
+        du.alive = false;
+        m.visible = false;
+        this.removeDaphniaFlockMemberFromScene(m);
+      }
+    }
+  }
+
+  /**
+   * Fin-kick frontal wedge (same wedge / range tiers as predator chip) bursts micro-flocks into nibbles.
+   */
+  squashDaphniaInFinKickFan(kickX, kickZ, fwdSn, fwdCs, spec) {
+    if (!this.daphniaRuntime.length || !this.scene || !spec) return;
+
+    const reachSq = spec.range * spec.range;
+    const broadSq = (spec.range + spec.broadExtra) ** 2;
+
+    for (const flock of this.daphniaRuntime) {
+      const cfg = flock.cfg;
+      const heal = cfg.nibbleHealPer;
+      const pts = cfg.pointValuePer ?? 0;
+
+      for (const m of flock.members) {
+        const du = m.userData.daphnia;
+        if (!du?.alive) continue;
+
+        const mx = m.position.x;
+        const mz = m.position.z;
+        const tcx = mx - kickX;
+        const tcz = mz - kickZ;
+        const dsq = tcx * tcx + tcz * tcz;
+        if (dsq > broadSq) continue;
+        if (dsq > reachSq || dsq < 1e-10) continue;
+        const dist = Math.sqrt(dsq);
+        const dot = (tcx / dist) * fwdSn + (tcz / dist) * fwdCs;
+        if (dot < spec.cosHalfFan) continue;
+
+        const sy = m.position.y + 0.07;
+        this.spawnPreyNibbleBurst(mx, sy, mz, heal, pts, {
+          nibbleAutoHomeFrac: 0.58,
+        });
+        du.alive = false;
+        m.visible = false;
+        this.removeDaphniaFlockMemberFromScene(m);
       }
     }
   }
@@ -1330,7 +1836,7 @@ export class Game {
     );
   }
 
-  tryEnemyRangedFire(predGrp, pd, live, dt, playerX, playerZ) {
+  tryEnemyRangedFire(predGrp, pd, live, dt, playerX, playerZ, playerMarshConcealed = false) {
     const ra = pd.rangedAttack;
     if (!ra || live.hpNow <= 0 || dt <= 0) return;
     if (this.playerDead || this.finished) return;
@@ -1345,6 +1851,12 @@ export class Game {
 
     if (rng > ra.maxRange) return;
     if (live.rangedCd > 0) return;
+
+    if (playerMarshConcealed) {
+      /** Suppress volley — short reacquire delay when cover breaks. */
+      if (live.rangedCd <= 0) live.rangedCd = ra.cooldown * 0.38;
+      return;
+    }
 
     live.rangedCd = ra.cooldown;
 
@@ -1385,6 +1897,38 @@ export class Game {
     if (pd.kind === "hydra_pod") colorHex = 0x9eecff;
 
     this.spawnEnemyBolt(sx, sz, ux, uz, ra.damage, ra.projectileRadius, ra.maxRange, colorHex);
+  }
+
+  playerNominalSurfaceY(x, z, elapsed) {
+    return this.playerFloatBaseY + waterSurfaceDisplacementY(x, z, elapsed);
+  }
+
+  consumePendingDiveLeapLaunch() {
+    if (!this.pendingDiveLeap) return;
+    this.pendingDiveLeap = false;
+    if (!this.track || this.playerDead || this.finished) return;
+    if (this.playerLeapPhase !== PLAYER_LEAP_NONE) return;
+    if (this.playerDiveCd > 0) return;
+
+    this.playerLeapAirKickBank = 0;
+    this.playerLeapPhase = PLAYER_LEAP_DIP;
+    this.playerLeapDipElapsed = 0;
+  }
+
+  spawnDiveLandingSplash() {
+    const pool = this.waterWakePool;
+    if (!pool) return;
+    const bx = this.pos.x;
+    const bz = this.pos.z;
+    const n = DIVE_JUMP.landSplashSpread;
+    const baseStr = DIVE_JUMP.landSplashStrength;
+    for (let i = 0; i < n; i += 1) {
+      pool.spawn(bx + (Math.random() - 0.5) * 1.15, bz + (Math.random() - 0.5) * 1.15, {
+        strength: baseStr * (0.88 + Math.random() * 0.34),
+        color: 0x9ae6ff,
+        wakeJitter: 1.2,
+      });
+    }
   }
 
   consumeVenomStrikeAttempt() {
@@ -1465,10 +2009,8 @@ export class Game {
           3.85,
           NIBBLE_HEAL_MAX
         );
-        const jx = (Math.random() - 0.5) * 1.35;
-        const jz = (Math.random() - 0.5) * 1.35;
         const sy = grp.userData.baseY ?? grp.position.y;
-        this.spawnPreyNibble(grp.position.x + jx, sy + 0.14, grp.position.z + jz, nibHeal);
+        this.spawnPreyNibbleBurst(grp.position.x, sy + 0.14, grp.position.z, nibHeal);
       }
       if (live.hpNow <= 0) {
         live.hpNow = 0;
@@ -1606,10 +2148,8 @@ export class Game {
           3.85,
           NIBBLE_HEAL_MAX
         );
-        const jx = (Math.random() - 0.5) * 1.25;
-        const jz = (Math.random() - 0.5) * 1.25;
         const sy = grp.userData.baseY ?? grp.position.y;
-        this.spawnPreyNibble(grp.position.x + jx, sy + 0.14, grp.position.z + jz, nibHeal);
+        this.spawnPreyNibbleBurst(grp.position.x, sy + 0.14, grp.position.z, nibHeal);
       }
       if (live.hpNow <= 0) {
         live.hpNow = 0;
@@ -1636,11 +2176,19 @@ export class Game {
     const fwdSn = steerRev ? -sn : sn;
     const fwdCs = steerRev ? -cs : cs;
 
-    const kickX = this.pos.x + fwdSn * KICK_STRIKE_FORWARD_INSET;
-    const kickZ = this.pos.z + fwdCs * KICK_STRIKE_FORWARD_INSET;
-
     const tier = this.classifyFinKickChargeTier(held);
     const spec = FIN_KICK_SPECS[tier];
+
+    if (tier !== "overhold") {
+      const airBoost = FIN_KICK_AIR_VY[tier];
+      if (typeof airBoost === "number" && airBoost > 0) {
+        if (this.playerLeapPhase === PLAYER_LEAP_DIP) {
+          this.playerLeapAirKickBank = Math.min(10.5, this.playerLeapAirKickBank + airBoost);
+        } else if (this.playerLeapPhase === PLAYER_LEAP_AIR) {
+          this.playerLeapVy = Math.min(DIVE_JUMP.maxUpwardVy, this.playerLeapVy + airBoost);
+        }
+      }
+    }
 
     if (tier === "overhold") {
       this.applyParasiteBleed(FIN_KICK_CHARGE.selfHarm);
@@ -1651,10 +2199,13 @@ export class Game {
     this.strikeKickPoseT = spec.poseSeconds;
     this.strikeKickPoseMax = spec.poseSeconds;
 
-    this.pos.x += fwdSn * spec.forwardSurge;
-    this.pos.z += fwdCs * spec.forwardSurge;
+    this.integratePlayerXZAgainstStones(fwdSn * spec.forwardSurge, fwdCs * spec.forwardSurge, 0.17);
+
+    const kickX = this.pos.x + fwdSn * KICK_STRIKE_FORWARD_INSET;
+    const kickZ = this.pos.z + fwdCs * KICK_STRIKE_FORWARD_INSET;
 
     const hitPredators = this.applyFinKickWave(kickX, kickZ, fwdSn, fwdCs, spec);
+    this.squashDaphniaInFinKickFan(kickX, kickZ, fwdSn, fwdCs, spec);
 
     if (tier === "mega") this.armMegaKickChromBurst(kickX, kickZ);
     else if (hitPredators.length > 0 && spec.burstVen) {
@@ -1953,6 +2504,128 @@ export class Game {
     return dx * dx + dz * dz < rr * rr;
   }
 
+  /** Move `(dx,dz)` in short slices while keeping the hull outside pond stones (see `PLAYER_STONE_HULL_R`). */
+  integratePlayerXZAgainstStones(dx, dz, maxSliceLen = STONE_XZ_MOVE_SLICE) {
+    if (!this.track) return;
+    const mag = Math.hypot(dx, dz);
+    if (mag < 1e-10) return;
+    const mx = THREE.MathUtils.clamp(maxSliceLen > 1e-4 ? maxSliceLen : STONE_XZ_MOVE_SLICE, 0.12, 0.42);
+    const n = THREE.MathUtils.clamp(Math.ceil(mag / mx), 1, 36);
+    for (let i = 0; i < n; i += 1) {
+      this.pos.x += dx / n;
+      this.pos.z += dz / n;
+      if (!this.playerDead) this.resolveStoneObstaclesXZ();
+    }
+  }
+
+  /**
+   * One sweep: push hull center `pos` outward from every submerged stone disk that overlaps XZ hull.
+   * @returns Whether any penetration was corrected.
+   */
+  separateHullXZFromStoneDisks(pos, hullR) {
+    const stones = this.stoneXZDisks;
+    if (!stones?.length) return false;
+    const pr = hullR;
+    let touched = false;
+    for (const s of stones) {
+      const dx = pos.x - s.x;
+      const dz = pos.z - s.z;
+      const dist = Math.hypot(dx, dz);
+      const sr = Math.max(s.radius, 1e-3);
+      const relax = Math.min(
+        STONE_CONTACT_SEP_RELAX,
+        THREE.MathUtils.clamp(sr * 0.068 + 0.018, 0.028, STONE_CONTACT_SEP_RELAX)
+      );
+      const sep = Math.max(sr + pr - relax, (sr + pr) * 0.945);
+      if (dist >= sep - 1e-5) continue;
+      touched = true;
+      if (dist < 1e-7) {
+        pos.x = s.x + sep;
+        pos.z = s.z;
+        continue;
+      }
+      const t = sep / dist;
+      pos.x = s.x + dx * t;
+      pos.z = s.z + dz * t;
+    }
+    return touched;
+  }
+
+  /**
+   * One sweep: lily pads act as surfaced disks — fish, grazers & rivals shouldn’t glide through pads.
+   * @returns Whether any penetration was corrected.
+   */
+  separateHullXZFromLilyPads(pos, hullR) {
+    const lilies = this.track?.lilies;
+    if (!lilies?.length) return false;
+    const pr = hullR;
+    let touched = false;
+    for (const l of lilies) {
+      const lx = l.position[0];
+      const lz = l.position[1];
+      const lr = Math.max(Number(l.radius) || 0, 0.34);
+      const dx = pos.x - lx;
+      const dz = pos.z - lz;
+      const dist = Math.hypot(dx, dz);
+      const relax = Math.min(
+        LILY_CONTACT_SEP_RELAX,
+        THREE.MathUtils.clamp(lr * 0.055 + 0.012, 0.022, LILY_CONTACT_SEP_RELAX)
+      );
+      const sep = Math.max(lr + pr - relax, (lr + pr) * 0.952);
+      if (dist >= sep - 1e-5) continue;
+      touched = true;
+      if (dist < 1e-7) {
+        pos.x = lx + sep;
+        pos.z = lz;
+        continue;
+      }
+      const t = sep / dist;
+      pos.x = lx + dx * t;
+      pos.z = lz + dz * t;
+    }
+    return touched;
+  }
+
+  /** Repeated sweeps vs stones until hull sits outside all disks (matches legacy swimmer settles). */
+  resolveHullAgainstStoneDisksPasses(pos, hullR) {
+    for (let pass = 0; pass < 12; pass += 1) {
+      if (!this.separateHullXZFromStoneDisks(pos, hullR)) break;
+    }
+  }
+
+  /** Stones + lily pads combined (entities other than swimmer — swimmer uses lily slowdown, not lily shove). */
+  resolveHullAgainstStoneAndLiliesPasses(pos, hullR) {
+    const stones = this.stoneXZDisks;
+    const lilies = this.track?.lilies;
+    if (!(stones?.length) && !(lilies?.length)) return;
+    for (let pass = 0; pass < 14; pass += 1) {
+      let t = false;
+      if (stones?.length && this.separateHullXZFromStoneDisks(pos, hullR)) t = true;
+      if (lilies?.length && this.separateHullXZFromLilyPads(pos, hullR)) t = true;
+      if (!t) break;
+    }
+  }
+
+  integrateEnemyXZAgainstPondSolids(pos, dx, dz, hullR) {
+    if (!this.track) return;
+    const mag = Math.hypot(dx, dz);
+    if (mag < 1e-10) return;
+    const mx = THREE.MathUtils.clamp(ENEMY_SOLID_XZ_SLICE > 1e-4 ? ENEMY_SOLID_XZ_SLICE : 0.26, 0.14, 0.52);
+    const n = THREE.MathUtils.clamp(Math.ceil(mag / mx), 1, 44);
+    for (let i = 0; i < n; i += 1) {
+      pos.x += dx / n;
+      pos.z += dz / n;
+      this.resolveHullAgainstStoneAndLiliesPasses(pos, hullR);
+    }
+  }
+
+  /** Push swimmer out of submerged stone footprints (solid obstacles; no lily-style hull penalty). */
+  resolveStoneObstaclesXZ() {
+    const stones = this.stoneXZDisks;
+    if (!stones?.length || !this.track || this.playerDead) return;
+    this.resolveHullAgainstStoneDisksPasses(this.pos, PLAYER_STONE_HULL_R);
+  }
+
   syncWaterUniforms(time) {
     if (this.pondSkyUniforms?.uTime) this.pondSkyUniforms.uTime.value = time;
     const m = this.waterMaterial;
@@ -1966,14 +2639,6 @@ export class Game {
 
       this._waterSunScratch.negate();
       u.uSunDir.value.copy(this._waterSunScratch);
-    }
-    const fog = this.scene.fog;
-    if (fog && /** @type {THREE.Fog} */ (fog).isFog) {
-      /** @type {THREE.Fog} */
-      const f = fog;
-      u.uFogNear.value = f.near;
-      u.uFogFar.value = f.far;
-      u.uFogColor.value.set(f.color.r, f.color.g, f.color.b);
     }
   }
 
@@ -1999,7 +2664,11 @@ export class Game {
     const pool = this.waterWakePool;
     if (!pool || !this.track || dt <= 0) return;
 
-    const swimmerMoves = !this.playerDead && !this.finished;
+    const swimmerMoves =
+      !this.playerDead &&
+      !this.finished &&
+      this.playerLeapPhase !== PLAYER_LEAP_DIP &&
+      this.playerLeapPhase !== PLAYER_LEAP_AIR;
     let dsp = Math.hypot(this.pos.x - this._wakeTrailPrev.x, this.pos.z - this._wakeTrailPrev.z);
 
     let acc = this._wakeTrailCarry;
@@ -2081,13 +2750,14 @@ export class Game {
 
   update(dt, time) {
     if (!this.track) return;
+    updateFoodPickupAnimations(this.track.food, this.foodMeshes, time);
 
     if (this.paused) {
       this.strikeKickCharging = false;
       this.strikeChargeT = 0;
       this.syncWaterUniforms(time);
+      this.syncPredatorHpHudDistanceVisibility();
       this.clampOverheadHudSpriteHeights();
-      this.refreshPlayerHudStrip();
       updatePondReeds(this.reedField, 0, time, [], this.pos.x, this.pos.z);
       return;
     }
@@ -2095,6 +2765,11 @@ export class Game {
     if (dt <= 0) return;
     if (this.playerDead) {
       this._deathSeqTime += dt;
+      this.pendingDiveLeap = false;
+      this.playerLeapPhase = PLAYER_LEAP_NONE;
+      this.playerLeapVy = 0;
+      this.playerLeapDipElapsed = 0;
+      this.playerLeapAirKickBank = 0;
     }
 
     this._kickHudTime = time;
@@ -2114,6 +2789,7 @@ export class Game {
 
     if (this.venomMeleeCd > 0) this.venomMeleeCd -= dt;
     if (this.strikeKickCd > 0) this.strikeKickCd -= dt;
+    if (!this.playerDead && !this.finished && this.playerDiveCd > 0) this.playerDiveCd -= dt;
     if (this.venomSurgeT > 0) this.venomSurgeT -= dt;
     if (!this.playerDead && !this.finished) {
       const surgeMult = this.venomSurgeT > 0 ? VENOM_SURGE_MULT : 1;
@@ -2152,11 +2828,28 @@ export class Game {
       }
     }
 
+    let lilyPerched = false;
+    if (
+      !this.playerDead &&
+      !this.finished &&
+      this.playerLeapPhase === PLAYER_LEAP_NONE &&
+      this.track.lilies?.length
+    ) {
+      for (const l of this.track.lilies) {
+        if (this.collideDisk(this.pos.x, this.pos.z, l.position[0], l.position[1], PLAYER_RADIUS, l.radius)) {
+          lilyPerched = true;
+          break;
+        }
+      }
+    }
+
     const foodCeiling =
       SPEED.baseMax + THREE.MathUtils.clamp(this.foodStacks, 0, 999) * SPEED.perFoodMax;
-    const speedCeiling = Math.min(SPEED.absoluteMaxCap, foodCeiling * softMult);
+    let speedCeiling = Math.min(SPEED.absoluteMaxCap, foodCeiling * softMult);
+    if (lilyPerched) speedCeiling *= LILY_TERRAIN.speedCapFrac;
 
-    const accel = SPEED.baseAccel * (1 + this.foodStacks * 0.055);
+    let accel = SPEED.baseAccel * (1 + this.foodStacks * 0.055);
+    if (lilyPerched) accel *= LILY_TERRAIN.accelFrac;
     const revCeilAbs = Math.max(0.35, speedCeiling * SPEED.reverseMaxFrac);
     const revAccel = accel * SPEED.reverseAccelFrac;
 
@@ -2166,9 +2859,9 @@ export class Game {
       const steerSign =
         stopped ? 1 : this.speed >= -0.025 ? 1 : -1;
       const yawIn = steerSign * yawInRaw;
-      const spf = stopped
-        ? SPEED.inPlaceTurnFrac
-        : THREE.MathUtils.clamp(Math.abs(this.speed) / 8, 0.28, 1.22);
+      const spf =
+        (stopped ? SPEED.inPlaceTurnFrac : THREE.MathUtils.clamp(Math.abs(this.speed) / 8, 0.28, 1.22)) *
+        (lilyPerched ? LILY_TERRAIN.turnFrac : 1);
       this.yaw += yawIn * SPEED.turnRate * spf * dt;
     }
 
@@ -2182,10 +2875,11 @@ export class Game {
       this.speed -= revAccel * dt;
       this.speed = THREE.MathUtils.clamp(this.speed, -revCeilAbs, speedCeiling);
     } else {
+      const dragLin = SPEED.waterDragLinear * (lilyPerched ? LILY_TERRAIN.dragLinearMul : 1);
       const d = THREE.MathUtils.lerp(
         Math.abs(this.speed),
         0,
-        1 - Math.exp(-SPEED.waterDragLinear * dt)
+        1 - Math.exp(-dragLin * dt)
       );
       this.speed = Math.sign(this.speed) * d;
       this.speed = THREE.MathUtils.clamp(this.speed, -revCeilAbs, speedCeiling);
@@ -2216,31 +2910,112 @@ export class Game {
     }
 
     const rowBoost = this.syncRowKickDynamics(time, thrust, reverse, dt, speedCeiling);
-    this.pos.x += sn * this.speed * rowBoost * dt;
-    this.pos.z += cs * this.speed * rowBoost * dt;
-    this.pos.y =
-      this.playerFloatBaseY + waterSurfaceDisplacementY(this.pos.x, this.pos.z, time);
+    const lilyRow = lilyPerched ? LILY_TERRAIN.rowMoveFrac : 1;
 
-    const hard = () => this.applyHardImpact();
-    for (const l of this.track.lilies) {
-      const hit = this.collideDisk(this.pos.x, this.pos.z, l.position[0], l.position[1], PLAYER_RADIUS, l.radius);
-      if (hit) hard();
+    const effGlide = Math.abs(this.speed) * rowBoost * lilyRow;
+    this._hudSpeedCeilingFwd = speedCeiling;
+    this._hudRevCeilAbs = revCeilAbs;
+    this._hudEffectiveGlide = effGlide;
+    this._hudRowBoostLive = rowBoost;
+    this._hudSignedSpeedSample = this.speed;
+    this._hudLilyPerchedNow = lilyPerched;
+
+    const vx = sn * this.speed * rowBoost * lilyRow * dt;
+    const vz = cs * this.speed * rowBoost * lilyRow * dt;
+    this.integratePlayerXZAgainstStones(vx, vz, STONE_XZ_MOVE_SLICE);
+    if (!this.playerDead) this.resolveStoneObstaclesXZ();
+
+    if (!this.playerDead && !this.finished) {
+      this.consumePendingDiveLeapLaunch();
+      const nominalSurf = this.playerNominalSurfaceY(this.pos.x, this.pos.z, time);
+
+      if (this.playerLeapPhase === PLAYER_LEAP_DIP) {
+        this.playerLeapDipElapsed += dt;
+        const dipDur = Math.max(DIVE_JUMP.dipDuration, 1e-4);
+        const u = THREE.MathUtils.clamp(this.playerLeapDipElapsed / dipDur, 0, 1);
+        const tuck = Math.sin(u * Math.PI);
+        const dipOff = -DIVE_JUMP.dipDepthMax * tuck * tuck;
+        this.pos.y = nominalSurf + dipOff;
+        if (this.playerLeapDipElapsed >= dipDur) {
+          this.playerLeapPhase = PLAYER_LEAP_AIR;
+          const bank = THREE.MathUtils.clamp(this.playerLeapAirKickBank, 0, 10.5);
+          this.playerLeapAirKickBank = 0;
+          this.playerLeapVy = Math.min(DIVE_JUMP.maxUpwardVy, DIVE_JUMP.launchVy + bank);
+        }
+      } else if (this.playerLeapPhase === PLAYER_LEAP_AIR) {
+        const asternStroke = this.speed < -0.06;
+        const ph = time * Math.PI * 2 * ROW_STROKE_HZ + (asternStroke ? Math.PI : 0);
+        const strokeDrive = thrust ? combinedKickDrive(ph) : 0;
+
+        this.playerLeapVy -= DIVE_JUMP.gravity * dt;
+        if (strokeDrive > 1e-4) {
+          this.playerLeapVy += DIVE_JUMP.airStrokeLiftRate * strokeDrive * dt;
+        }
+        this.playerLeapVy = Math.min(DIVE_JUMP.maxUpwardVy, this.playerLeapVy);
+        this.pos.y += this.playerLeapVy * dt;
+
+        const landEps = 0.058;
+        if (this.pos.y <= nominalSurf + landEps && this.playerLeapVy <= 0) {
+          this.pos.y = nominalSurf;
+          this.playerLeapVy = 0;
+          this.playerLeapPhase = PLAYER_LEAP_NONE;
+          this.playerDiveCd = DIVE_JUMP.cooldown;
+          this.spawnDiveLandingSplash();
+          this.squashDaphniaWithSplash(this.pos.x, this.pos.z);
+        }
+      } else {
+        this.pos.y = nominalSurf;
+      }
+    } else {
+      this.pendingDiveLeap = false;
+      this.playerLeapPhase = PLAYER_LEAP_NONE;
+      this.playerLeapVy = 0;
+      this.playerLeapDipElapsed = 0;
+      this.playerLeapAirKickBank = 0;
+      this.pos.y = this.playerNominalSurfaceY(this.pos.x, this.pos.z, time);
     }
+
+    if (!this.finished && !this.playerDead) this.updateDaphniaFlocks(dt, time);
+
+    const marshConceal =
+      !!this.reedField?.clusters?.length &&
+      !this.playerDead &&
+      !this.finished &&
+      playerConcealedInReeds(this.reedField, this.pos.x, this.pos.z, PLAYER_RADIUS);
+
+    const hard = () => {
+      if (marshConceal) return;
+      this.applyHardImpact();
+    };
 
     for (const grp of this.fishInst) {
       const fd = grp.userData.fishData;
+      const ox = grp.position.x;
+      const oz = grp.position.z;
       advanceFish(grp, fd, dt);
-      grp.position.y = fd.y + Math.sin(time * 2.1 + fd.position[0] * 0.12) * 0.05;
+      const dx = grp.position.x - ox;
+      const dz = grp.position.z - oz;
+      grp.position.x = ox;
+      grp.position.z = oz;
       const bodyR = Math.max(fd.length, fd.width) * 0.36;
+      this.integrateEnemyXZAgainstPondSolids(grp.position, dx, dz, bodyR);
+      grp.position.y = fd.y + Math.sin(time * 2.1 + fd.position[0] * 0.12) * 0.05;
       if (this.collideDisk(this.pos.x, this.pos.z, grp.position.x, grp.position.z, PLAYER_RADIUS, bodyR)) hard();
     }
 
     for (const grp of this.racerInst) {
       const rcfg = grp.userData.racerCfg;
+      const ox = grp.position.x;
+      const oz = grp.position.z;
       advanceRival(grp, rcfg, dt);
+      const dx = grp.position.x - ox;
+      const dz = grp.position.z - oz;
+      grp.position.x = ox;
+      grp.position.z = oz;
+      const bodyR = 1.06;
+      this.integrateEnemyXZAgainstPondSolids(grp.position, dx, dz, bodyR);
       grp.position.y =
         (rcfg.y ?? 0.35) + waterSurfaceDisplacementY(grp.position.x, grp.position.z, time);
-      const bodyR = 1.06;
       if (this.collideDisk(this.pos.x, this.pos.z, grp.position.x, grp.position.z, PLAYER_RADIUS, bodyR)) hard();
     }
 
@@ -2260,6 +3035,7 @@ export class Game {
       grp.userData.dmgSquashT = Math.max(0, dmgSqu);
 
       const engageSq = pd.engageRadius * pd.engageRadius;
+      const predHullR = this.predatorMeleeEnvelopeRadius(grp, pd);
       const kick =
         grp.userData.dmgSquashT > 0
           ? Math.sin(time * 124 + idle) *
@@ -2267,18 +3043,47 @@ export class Game {
             0.28
           : 0;
 
-      advanceMozzieTowardPlayer(
-        grp,
-        dt,
-        this.pos.x,
-        this.pos.z,
-        pd.chaseSpeed,
-        live.homeX,
-        live.homeZ,
-        engageSq,
-        time,
-        kick
-      );
+      const ox = grp.position.x;
+      const oz = grp.position.z;
+      if (pd.kind === "mosquito_larva") {
+        advanceMosquitoLarvaTowardPlayer(
+          grp,
+          dt,
+          PLAYER_RADIUS,
+          this.pos.x,
+          this.pos.z,
+          this.yaw,
+          pd.chaseSpeed,
+          live.homeX,
+          live.homeZ,
+          engageSq,
+          time,
+          kick,
+          predHullR,
+          this.playerDead || this.finished,
+          marshConceal,
+          live
+        );
+      } else {
+        advanceMozzieTowardPlayer(
+          grp,
+          dt,
+          this.pos.x,
+          this.pos.z,
+          pd.chaseSpeed,
+          live.homeX,
+          live.homeZ,
+          engageSq,
+          time,
+          kick,
+          marshConceal
+        );
+      }
+      const pdx = grp.position.x - ox;
+      const pdz = grp.position.z - oz;
+      grp.position.x = ox;
+      grp.position.z = oz;
+      this.integrateEnemyXZAgainstPondSolids(grp.position, pdx, pdz, predHullR);
 
       const baseY = grp.userData.baseY ?? pd.position[1];
       grp.position.y = baseY + waterSurfaceDisplacementY(grp.position.x, grp.position.z, time);
@@ -2295,9 +3100,9 @@ export class Game {
         }
       }
 
-      this.tryEnemyRangedFire(grp, pd, live, dt, this.pos.x, this.pos.z);
+      this.tryEnemyRangedFire(grp, pd, live, dt, this.pos.x, this.pos.z, marshConceal);
 
-      const meleeR = this.predatorMeleeEnvelopeRadius(grp, pd);
+      const meleeR = predHullR;
       const hullOverlap = this.collideDisk(
         this.pos.x,
         this.pos.z,
@@ -2341,7 +3146,7 @@ export class Game {
       }
 
       const inContact = parasite > 1e-6 && (weakHit || hullOverlap);
-      if (inContact && !this.playerDead && !this.finished) {
+      if (inContact && !marshConceal && !this.playerDead && !this.finished) {
         live.biteCd -= dt;
         if (live.biteCd <= 0) {
           this.applyParasiteBleed(parasite);
@@ -2354,7 +3159,7 @@ export class Game {
       this.predWakeStrikeFlashTick(grp, dt);
     }
 
-    this.advanceEnemyRangedBolts(dt, this.pos.x, this.pos.z);
+    this.advanceEnemyRangedBolts(dt, this.pos.x, this.pos.z, marshConceal);
 
     this.updatePreyNibbles(dt, time);
 
@@ -2412,6 +3217,8 @@ export class Game {
     this.camera.position.lerp(camWish, 1 - Math.exp(-3.85 * dt));
     this.camera.lookAt(lookPt);
 
+    this.syncPredatorHpHudDistanceVisibility();
+
     this.advanceWaterTextureScroll(dt);
     this.spawnSurfaceWakeTrails(dt);
     if (this.waterWakePool) this.waterWakePool.update(dt);
@@ -2466,7 +3273,6 @@ export class Game {
     updatePondReeds(this.reedField, dt, time, reedMovers, this.pos.x, this.pos.z);
 
     this.clampOverheadHudSpriteHeights();
-    this.refreshPlayerHudStrip();
 
     this.updateCourseVisuals(dt, time);
   }
@@ -2527,7 +3333,11 @@ export class Game {
     if (headingErr > 0.52) turn = ', veer <kbd>D</kbd> / right';
     else if (headingErr < -0.52) turn = ', veer <kbd>A</kbd> / left';
 
-    return `Follow aqua ribbon → <strong>gate ${escapeHtml(String(this.nextCp + 1))}</strong> ~${escapeHtml(dist.toFixed(0))} units${turn}`;
+    const gate = `<strong>${escapeHtml(this.track.metadata?.courseRibbon !== false ? "Gate" : "Checkpoint")} ${escapeHtml(String(this.nextCp + 1))}</strong>`;
+    if (this.track.metadata?.courseRibbon === false) {
+      return `Next ${gate} · ~${escapeHtml(dist.toFixed(0))} units${turn}`;
+    }
+    return `Follow aqua ribbon → ${gate} · ~${escapeHtml(dist.toFixed(0))} units${turn}`;
   }
 
   maybeFinishBuffetVictory() {
@@ -2611,6 +3421,32 @@ export class Game {
     this.points += Math.floor(v);
   }
 
+  /** Hide predator HP overlays when grazers lie beyond ~`PRED_HP_HUD_MAX_DISTANCE_SCREEN_HEIGHTS` swimmer-depth viewport heights. */
+  syncPredatorHpHudDistanceVisibility() {
+    const cam = this.camera;
+    if (!cam?.isPerspectiveCamera || !this.track) return;
+
+    const tanHalf = Math.tan(THREE.MathUtils.degToRad(cam.fov * 0.5));
+    this._spriteClampCenter.set(this.pos.x, this.pos.y, this.pos.z);
+    const camToPlay = THREE.MathUtils.clamp(cam.position.distanceTo(this._spriteClampCenter), 1.05, 240);
+    const viewportHWorld = 2 * tanHalf * camToPlay;
+    const maxHudShowDist = viewportHWorld * PRED_HP_HUD_MAX_DISTANCE_SCREEN_HEIGHTS;
+
+    for (const grp of this.predatorInst) {
+      const live = grp.userData.live;
+      const spr = grp.userData.hpHud?.sprite;
+      if (!spr) continue;
+
+      if (!live || live.hpNow <= 0 || !grp.visible) {
+        spr.visible = false;
+        continue;
+      }
+
+      spr.visible =
+        grp.position.distanceTo(cam.position) <= maxHudShowDist + 2e-3;
+    }
+  }
+
   /** Keep overhead HP sprites from dominating the chase cam when grazing enemies fill the frame. */
   clampOverheadHudSpriteHeights() {
     const cam = this.camera;
@@ -2628,15 +3464,9 @@ export class Game {
       const hud = grp.userData.hpHud;
       const spr = hud?.sprite;
       const base = grp.userData._hpHudBaseScaleCopy;
-      if (!spr || !base || !grp.visible || !live || live.hpNow <= 0) continue;
+      if (!spr?.visible || !base || !grp.visible || !live || live.hpNow <= 0) continue;
       sprs.push(spr);
       spr.scale.copy(base);
-    }
-
-    if (!this.playerDead && this.playerHpHud?.sprite && this._playerHpHudBaseScale) {
-      const ps = this.playerHpHud.sprite;
-      sprs.push(ps);
-      ps.scale.copy(this._playerHpHudBaseScale);
     }
 
     for (const spr of sprs) {
@@ -2669,7 +3499,7 @@ export class Game {
       nav = this.nextGoalHudLine();
     }
 
-    return `<div style="margin-top:12px;line-height:1.5;color:#eaf6ff">${nav ? `<div style="margin-bottom:12px;line-height:1.45">${nav}</div>` : ""}<div style="opacity:.94;font-weight:650;font-size:12px">${name}</div><div style="opacity:.76;font-size:11px;line-height:1.55;margin-top:10px"><kbd>W</kbd>/<kbd>↑</kbd> stroke · <kbd>S</kbd>/<kbd>↓</kbd> reverse<br><kbd>A</kbd><kbd>D</kbd> / <kbd>←</kbd><kbd>→</kbd> turn (in place OK)<br><kbd>Space</kbd> venom cone (costs saliva)<br><kbd>F</kbd> fin kick · hold/release (sweet mega splash)<br><kbd>R</kbd> reset pond · <kbd>Esc</kbd> resume</div></div>`;
+    return `<div style="margin-top:12px;line-height:1.5;color:#eaf6ff">${nav ? `<div style="margin-bottom:12px;line-height:1.45">${nav}</div>` : ""}<div style="opacity:.94;font-weight:650;font-size:12px">${name}</div><div style="opacity:.76;font-size:11px;line-height:1.55;margin-top:10px"><kbd>W</kbd>/<kbd>↑</kbd> stroke · <kbd>S</kbd>/<kbd>↓</kbd> reverse<br><kbd>A</kbd><kbd>D</kbd> / <kbd>←</kbd><kbd>→</kbd> turn (in place OK)<br><kbd>Space</kbd> dive & jump<br><kbd>E</kbd> venom cone (costs saliva)<br><kbd>F</kbd> fin kick · hold/release (mega splash)<br>In air: stroke & fin kicks extend the hop.<br><kbd>R</kbd> reset pond · <kbd>Esc</kbd> resume</div></div>`;
   }
 
   /**
@@ -2765,6 +3595,48 @@ export class Game {
 <div>
   <div style="font-size:11px;font-weight:630;opacity:.85">${`<span style="${vnLabelTone}">Venom / saliva ${escapeHtml(`${Math.round(this.venom)}/${Math.round(this.venomMax)}`)}</span>`}${surgeTag}</div>
   <div style="margin-top:3px;height:8px;background:rgba(0,0,0,.32);border-radius:4px;overflow:hidden;border:${vnTrackBorder};position:relative"><div style="height:100%;width:${escapeHtml(String(vnW.toFixed(1)))}%;background:${vnFillBg}"></div><div aria-hidden="true" style="pointer-events:none;position:absolute;top:0;bottom:0;left:${escapeHtml(venomBiteCostPct.toFixed(2))}%;width:1px;background:rgba(255,255,255,0.24);box-shadow:0 0 2px rgba(0,0,0,.5)"></div></div>
+</div>
+<div>
+${(() => {
+  const fwdCeil =
+    typeof this._hudSpeedCeilingFwd === "number" && Number.isFinite(this._hudSpeedCeilingFwd)
+      ? this._hudSpeedCeilingFwd
+      : SPEED.baseMax;
+  const revCeilAbs =
+    typeof this._hudRevCeilAbs === "number" && Number.isFinite(this._hudRevCeilAbs)
+      ? this._hudRevCeilAbs
+      : SPEED.baseMax * SPEED.reverseMaxFrac;
+  const eff =
+    typeof this._hudEffectiveGlide === "number" && Number.isFinite(this._hudEffectiveGlide)
+      ? this._hudEffectiveGlide
+      : Math.abs(Number(this.speed) || 0);
+  const signed =
+    typeof this._hudSignedSpeedSample === "number" && Number.isFinite(this._hudSignedSpeedSample)
+      ? this._hudSignedSpeedSample
+      : Number(this.speed) || 0;
+  const denom = Math.max(Math.max(fwdCeil, revCeilAbs), 0.08);
+  const barPct = THREE.MathUtils.clamp((eff / denom) * 100, 0, 100);
+  const lilyTag =
+    this._hudLilyPerchedNow
+      ? `<span style="opacity:.72;font-weight:620;font-size:10px;color:#9af0d4"> · pad</span>`
+      : "";
+  const dirLbl = signed > 0.04 ? "forward" : signed < -0.04 ? "astern" : "idle";
+  const rowK =
+    typeof this._hudRowBoostLive === "number" && Number.isFinite(this._hudRowBoostLive)
+      ? this._hudRowBoostLive
+      : 1;
+  const effTxt = escapeHtml(`${eff.toFixed(1)}`);
+  const fwdTxt = escapeHtml(`${fwdCeil.toFixed(1)}`);
+  const revTxt = escapeHtml(`${revCeilAbs.toFixed(1)}`);
+  const rkTxt = escapeHtml(`${rowK.toFixed(2)}`);
+  return `<div style="font-size:11px;font-weight:630;opacity:.85">Underway <span style="opacity:.72;font-weight:600">${escapeHtml(dirLbl)}${lilyTag}</span></div>
+  <div style="margin-top:2px;display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:10px;opacity:.8;line-height:1.35;">
+    <span><strong style="color:#9fe8ff;font-weight:740">${effTxt}</strong> glide</span>
+    <span style="opacity:.72">+${fwdTxt} / −${revTxt}</span>
+    <span style="opacity:.68;font-size:10px">row ×${rkTxt}</span>
+  </div>
+  <div style="margin-top:3px;height:7px;background:rgba(0,0,0,.3);border-radius:4px;overflow:hidden;border:1px solid rgba(155,226,255,.28)"><div style="height:100%;width:${escapeHtml(String(barPct.toFixed(1)))}%;background:linear-gradient(90deg,#2878c8,#62d8ff,#b8fbff);box-shadow:0 0 6px rgba(120,238,255,.22)"></div></div>`;
+})()}
 </div>
 </div>`;
 

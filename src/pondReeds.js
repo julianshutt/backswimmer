@@ -49,6 +49,21 @@ function createTaperedBladeGeometry(h, baseW, tipW, depth) {
   geom.setAttribute("position", new THREE.BufferAttribute(p, 3));
   geom.setIndex(idx);
   geom.computeVertexNormals();
+
+  const uvs = new Float32Array(8 * 2);
+  const hScale = Math.max(h, 1e-4);
+  for (let vi = 0; vi < 8; vi += 1) {
+    const vx = p[vi * 3];
+    const vy = p[vi * 3 + 1];
+    const vz = p[vi * 3 + 2];
+    let u = Math.atan2(vz, vx) / (Math.PI * 2) + 0.5;
+    if (u < 0) u += 1;
+    const v = THREE.MathUtils.clamp(vy / hScale, 0, 1);
+    uvs[vi * 2] = u;
+    uvs[vi * 2 + 1] = v;
+  }
+  geom.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+
   return geom;
 }
 
@@ -95,6 +110,69 @@ function pooledReedMaterial(col) {
   return mat;
 }
 
+/** Tinted clones of textured grass (~12×8 keys) — share maps with base; disposable per reed teardown. */
+const _reedGrassTintCache = new Map();
+const _grassTintHslScratch = { h: 0, s: 0, l: 0 };
+const _grassTintColScratch = new THREE.Color();
+
+/**
+ * Same PBR textures as `baseGrass`, quantized per-stem color variation (height + RNG).
+ *
+ * @param {THREE.MeshStandardMaterial} baseGrass
+ * @param {(n:number)=>number} rand
+ * @param {number} bladeH
+ * @param {number} hLo cluster min height
+ * @param {number} hHi cluster max height
+ * @param {'fill' | 'dense' | 'curtain' | 'edgeFill'} profile
+ */
+function reedGrassTintedMaterial(baseGrass, rand, bladeH, hLo, hHi, profile) {
+  const span = Math.max(hHi - hLo, 1e-5);
+  const hn = THREE.MathUtils.clamp((bladeH - hLo) / span, 0, 1);
+  const hb = Math.min(11, Math.floor(hn * 12));
+  const rb = Math.floor(rand() * 8);
+  const key = hb * 8 + rb;
+
+  let m = _reedGrassTintCache.get(key);
+  if (!m) {
+    m = baseGrass.clone();
+    m.name = `reedGrassTint_${hb}_${rb}`;
+    delete m.userData.skipDisposeInSceneTraverse;
+
+    baseGrass.color.getHSL(_grassTintHslScratch);
+    const hsl = _grassTintHslScratch;
+    const hnBucket = hb / 11;
+
+    hsl.l +=
+      THREE.MathUtils.lerp(-0.042, 0.168, hnBucket) +
+      (rb / 7 - 0.5) * 0.11 +
+      0.038;
+    hsl.s +=
+      THREE.MathUtils.lerp(0.014, -0.026, hnBucket * 0.55) +
+      (((rb + hb) % 5) / 5 - 0.5) * 0.06;
+    hsl.h +=
+      ((((hb + rb * 3) % 17) / 17) - 0.5) * 0.026;
+
+    if (profile === "curtain") {
+      hsl.l += 0.022;
+      hsl.s *= 1.04;
+    } else if (profile === "edgeFill") {
+      hsl.l += 0.018;
+    } else if (profile === "dense") {
+      hsl.h += 0.006;
+      hsl.l += 0.008;
+    }
+
+    hsl.l = THREE.MathUtils.clamp(hsl.l, 0.22, 0.72);
+    hsl.s = THREE.MathUtils.clamp(hsl.s, 0.14, 0.58);
+
+    _grassTintColScratch.setHSL(hsl.h, hsl.s, hsl.l);
+    m.color.copy(_grassTintColScratch);
+
+    _reedGrassTintCache.set(key, m);
+  }
+  return m;
+}
+
 /** [hue, saturation, lightness] presets — marsh greens, olive, wet straw, brown stem. */
 const REED_COLOR_SETS = [
   [0.29, 0.55, 0.3],
@@ -110,19 +188,22 @@ function pickReedColor(rand, profile) {
   const set = REED_COLOR_SETS[Math.floor(rand() * REED_COLOR_SETS.length)];
   const h = THREE.MathUtils.clamp(set[0] + (rand() - 0.5) * 0.05, 0.05, 0.45);
   let s = THREE.MathUtils.clamp(set[1] + (rand() - 0.5) * 0.12, 0.12, 0.62);
-  let l = THREE.MathUtils.clamp(set[2] + (rand() - 0.5) * 0.08, 0.15, 0.44);
+  let l = THREE.MathUtils.clamp(set[2] + (rand() - 0.5) * 0.1, 0.15, 0.5);
   if (profile === "curtain") {
     s *= 1.05;
-    l *= 0.94;
+    l *= 0.97;
   }
+  if (rand() > 0.55) l = THREE.MathUtils.clamp(l + rand() * 0.08, 0.18, 0.52);
+
   return new THREE.Color().setHSL(h, s, l);
 }
 
 /**
  * @param {'fill' | 'dense' | 'curtain' | 'edgeFill'} profile
  * @param {(x:number,z:number)=>boolean} okHere
+ * @param {THREE.MeshStandardMaterial | null} [grassShared] one material for every stem when set (shared maps)
  */
-function tryAddCluster(root, clusters, rand, cx, cz, okHere, profile) {
+function tryAddCluster(root, clusters, rand, cx, cz, okHere, profile, grassShared) {
   if (!okHere(cx, cz)) return false;
 
   const cg = new THREE.Group();
@@ -142,9 +223,9 @@ function tryAddCluster(root, clusters, rand, cx, cz, okHere, profile) {
   let tipFracHi;
 
   if (profile === "curtain") {
-    nStemLo = 10;
-    nStemHi = 20;
-    spread = THREE.MathUtils.lerp(5.1, 10.4, rand());
+    nStemLo = 13;
+    nStemHi = 27;
+    spread = THREE.MathUtils.lerp(4.75, 10.6, rand());
     hLo = 4.85;
     hHi = 12.6;
     wLo = 0.092;
@@ -154,9 +235,9 @@ function tryAddCluster(root, clusters, rand, cx, cz, okHere, profile) {
     tipFracLo = 0.045;
     tipFracHi = 0.128;
   } else if (profile === "edgeFill") {
-    nStemLo = 6;
-    nStemHi = 13;
-    spread = THREE.MathUtils.lerp(3.05, 5.85, rand());
+    nStemLo = 8;
+    nStemHi = 18;
+    spread = THREE.MathUtils.lerp(2.65, 5.95, rand());
     hLo = 2.55;
     hHi = 7.85;
     wLo = 0.068;
@@ -166,9 +247,9 @@ function tryAddCluster(root, clusters, rand, cx, cz, okHere, profile) {
     tipFracLo = 0.055;
     tipFracHi = 0.158;
   } else if (profile === "dense") {
-    nStemLo = 7;
-    nStemHi = 15;
-    spread = THREE.MathUtils.lerp(2.32, 3.52, rand());
+    nStemLo = 9;
+    nStemHi = 22;
+    spread = THREE.MathUtils.lerp(1.88, 3.18, rand());
     hLo = 1.05;
     hHi = 3.92;
     wLo = 0.056;
@@ -178,9 +259,9 @@ function tryAddCluster(root, clusters, rand, cx, cz, okHere, profile) {
     tipFracLo = 0.072;
     tipFracHi = 0.22;
   } else {
-    nStemLo = 5;
-    nStemHi = 12;
-    spread = THREE.MathUtils.lerp(2.02, 2.82, rand());
+    nStemLo = 7;
+    nStemHi = 16;
+    spread = THREE.MathUtils.lerp(1.78, 2.58, rand());
     hLo = 0.88;
     hHi = 3.18;
     wLo = 0.048;
@@ -194,6 +275,12 @@ function tryAddCluster(root, clusters, rand, cx, cz, okHere, profile) {
   const nStems = nStemLo + Math.floor(rand() * (nStemHi - nStemLo + 1));
   const stems = [];
 
+  let hideR;
+  if (profile === "curtain") hideR = spread * 0.52 + 3.65;
+  else if (profile === "edgeFill") hideR = spread * 0.5 + 2.55;
+  else if (profile === "dense") hideR = spread * 0.55 + 2.05;
+  else hideR = spread * 0.52 + 1.78;
+
   for (let s = 0; s < nStems; s += 1) {
     const ox = (rand() - 0.5) * spread;
     const oz = (rand() - 0.5) * spread;
@@ -203,7 +290,9 @@ function tryAddCluster(root, clusters, rand, cx, cz, okHere, profile) {
     const tipW = baseW * THREE.MathUtils.lerp(tipFracLo, tipFracHi, rand());
 
     const geom = pooledBladeGeometry(h, baseW, tipW, depth);
-    const mat = pooledReedMaterial(pickReedColor(rand, profile));
+    const mat = grassShared
+      ? reedGrassTintedMaterial(grassShared, rand, h, hLo, hHi, profile)
+      : pooledReedMaterial(pickReedColor(rand, profile));
     const mesh = new THREE.Mesh(geom, mat);
     mesh.position.set(ox, 0, oz);
     mesh.rotation.y = rand() * Math.PI * 2;
@@ -233,15 +322,18 @@ function tryAddCluster(root, clusters, rand, cx, cz, okHere, profile) {
     });
   }
 
-  clusters.push({ group: cg, stems });
+  clusters.push({ group: cg, stems, hideX: cx, hideZ: cz, hideR });
   return true;
 }
 
 /**
  * Deterministic stitched edge grid to remove stochastic gaps along the pond rim.
  */
-function latticeEdgeBands(root, clusters, rand, half, okLoose, profile) {
-  const step = 5.95;
+/**
+ * @param {THREE.MeshStandardMaterial | null} grassShared Same as `reedGrassShared` in {@link createPondReedField}.
+ */
+function latticeEdgeBands(root, clusters, rand, half, okLoose, profile, grassShared) {
+  const step = 4.45;
   const bands = [8, 20, 32];
 
   for (const b of bands) {
@@ -249,25 +341,25 @@ function latticeEdgeBands(root, clusters, rand, half, okLoose, profile) {
     for (let gx = -half + 6; gx <= half - 6; gx += step) {
       const jx = gx + (rand() - 0.5) * 1.55;
       const jz = zN + (rand() - 0.5) * 1.45;
-      tryAddCluster(root, clusters, rand, jx, jz, okLoose, profile);
+      tryAddCluster(root, clusters, rand, jx, jz, okLoose, profile, grassShared);
     }
     const zS = -half + b;
     for (let gx = -half + 6; gx <= half - 6; gx += step) {
       const jx = gx + (rand() - 0.5) * 1.55;
       const jz = zS + (rand() - 0.5) * 1.45;
-      tryAddCluster(root, clusters, rand, jx, jz, okLoose, profile);
+      tryAddCluster(root, clusters, rand, jx, jz, okLoose, profile, grassShared);
     }
     const xE = half - b;
     for (let gz = -half + 6; gz <= half - 6; gz += step) {
       const jx = xE + (rand() - 0.5) * 1.45;
       const jz = gz + (rand() - 0.5) * 1.55;
-      tryAddCluster(root, clusters, rand, jx, jz, okLoose, profile);
+      tryAddCluster(root, clusters, rand, jx, jz, okLoose, profile, grassShared);
     }
     const xW = -half + b;
     for (let gz = -half + 6; gz <= half - 6; gz += step) {
       const jx = xW + (rand() - 0.5) * 1.45;
       const jz = gz + (rand() - 0.5) * 1.55;
-      tryAddCluster(root, clusters, rand, jx, jz, okLoose, profile);
+      tryAddCluster(root, clusters, rand, jx, jz, okLoose, profile, grassShared);
     }
   }
 }
@@ -275,10 +367,14 @@ function latticeEdgeBands(root, clusters, rand, half, okLoose, profile) {
 /**
  * Dense marsh fill + stitched perimeter grids + stochastic curtains.
  */
-export function createPondReedField(track, seed = 0x5eed) {
+/**
+ * @param {THREE.MeshStandardMaterial | null | undefined} [reedGrassShared] Optional shared grass PBR; see `reedTextures.js`.
+ */
+export function createPondReedField(track, seed = 0x5eed, reedGrassShared = null) {
   const rand = mulberry32(seed >>> 0);
   const root = new THREE.Group();
   root.name = "pondReeds";
+  const grass = reedGrassShared ?? null;
 
   const half = 258;
   const innerPlay = half - 40;
@@ -316,64 +412,83 @@ export function createPondReedField(track, seed = 0x5eed) {
   const okLoose = (x, z) => clearance(x, z) >= 0.75 && Math.abs(x) <= half - 1 && Math.abs(z) <= half - 1;
 
   let tries = 0;
-  while (clusters.length < 132 && tries < 8200) {
+  while (clusters.length < 198 && tries < 12000) {
     tries += 1;
     const cx = (rand() * 2 - 1) * innerPlay * 0.93;
     const cz = (rand() * 2 - 1) * innerPlay * 0.93;
-    tryAddCluster(root, clusters, rand, cx, cz, okInterior, rand() > 0.42 ? "dense" : "fill");
+    tryAddCluster(root, clusters, rand, cx, cz, okInterior, rand() > 0.42 ? "dense" : "fill", grass);
   }
 
-  latticeEdgeBands(root, clusters, rand, half, okLoose, "edgeFill");
+  latticeEdgeBands(root, clusters, rand, half, okLoose, "edgeFill", grass);
 
   let quota = clusters.length;
 
   tries = 0;
-  while (clusters.length < quota + 110 && tries < 11800) {
+  while (clusters.length < quota + 154 && tries < 14000) {
     tries += 1;
     const cz = THREE.MathUtils.lerp(half - 60, half - 7, rand());
     const cx = THREE.MathUtils.lerp(-half + 8, half - 8, rand()) + (rand() - 0.5) * 11;
-    tryAddCluster(root, clusters, rand, cx, cz, okBand, "curtain");
+    tryAddCluster(root, clusters, rand, cx, cz, okBand, "curtain", grass);
   }
 
   quota = clusters.length;
   tries = 0;
-  while (clusters.length < quota + 110 && tries < 11800) {
+  while (clusters.length < quota + 154 && tries < 14000) {
     tries += 1;
     const cz = -THREE.MathUtils.lerp(half - 60, half - 7, rand());
     const cx = THREE.MathUtils.lerp(-half + 8, half - 8, rand()) + (rand() - 0.5) * 11;
-    tryAddCluster(root, clusters, rand, cx, cz, okBand, "curtain");
+    tryAddCluster(root, clusters, rand, cx, cz, okBand, "curtain", grass);
   }
 
   quota = clusters.length;
   tries = 0;
-  while (clusters.length < quota + 110 && tries < 11800) {
+  while (clusters.length < quota + 154 && tries < 14000) {
     tries += 1;
     const cx = THREE.MathUtils.lerp(half - 60, half - 7, rand());
     const cz = THREE.MathUtils.lerp(-half + 8, half - 8, rand()) + (rand() - 0.5) * 11;
-    tryAddCluster(root, clusters, rand, cx, cz, okBand, "curtain");
+    tryAddCluster(root, clusters, rand, cx, cz, okBand, "curtain", grass);
   }
 
   quota = clusters.length;
   tries = 0;
-  while (clusters.length < quota + 110 && tries < 11800) {
+  while (clusters.length < quota + 154 && tries < 14000) {
     tries += 1;
     const cx = -THREE.MathUtils.lerp(half - 60, half - 7, rand());
     const cz = THREE.MathUtils.lerp(-half + 8, half - 8, rand()) + (rand() - 0.5) * 11;
-    tryAddCluster(root, clusters, rand, cx, cz, okBand, "curtain");
+    tryAddCluster(root, clusters, rand, cx, cz, okBand, "curtain", grass);
   }
 
   quota = clusters.length;
   tries = 0;
-  while (clusters.length < quota + 130 && tries < 10500) {
+  while (clusters.length < quota + 192 && tries < 13200) {
     tries += 1;
     const cx = (rand() * 2 - 1) * (half - 8);
     const cz = (rand() * 2 - 1) * (half - 8);
     if (!(Math.abs(cx) > innerPlay * 0.93 || Math.abs(cz) > innerPlay * 0.93)) continue;
     const prof = rand() > 0.72 ? "curtain" : "dense";
-    tryAddCluster(root, clusters, rand, cx, cz, okEdge, prof);
+    tryAddCluster(root, clusters, rand, cx, cz, okEdge, prof, grass);
   }
 
   return { root, clusters };
+}
+
+/**
+ * Rough gameplay cover: swimmer hull (XZ) overlaps the marsh footprint disk of any cluster.
+ * Enemies should treat this as “lost line of sight”.
+ */
+export function playerConcealedInReeds(field, px, pz, hullR = 0.58) {
+  const hr = Math.max(hullR, 0.12) * 0.38;
+  for (const c of field?.clusters ?? []) {
+    const r = typeof c.hideR === "number" && Number.isFinite(c.hideR) ? c.hideR : 0;
+    if (!(r > 0.15)) continue;
+    const ox = typeof c.hideX === "number" && Number.isFinite(c.hideX) ? c.hideX : (c.group?.position?.x ?? 0);
+    const oz = typeof c.hideZ === "number" && Number.isFinite(c.hideZ) ? c.hideZ : (c.group?.position?.z ?? 0);
+    const dx = px - ox;
+    const dz = pz - oz;
+    const reach = r + hr;
+    if (dx * dx + dz * dz <= reach * reach) return true;
+  }
+  return false;
 }
 
 const INFL_R = 15.2;

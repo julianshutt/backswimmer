@@ -132,24 +132,68 @@ export function generateProceduralTrackRaw(seedOpt) {
   const dz = first.position[2] - sz;
   const yawDeg = (Math.atan2(dx, dz) * 180) / Math.PI;
 
-  /** Scattered lily pads — avoid hull / ribbon spine. */
-  const nLilies = rInt(rand, 7, 19);
+  /** Clustered lily pads — small clumps (not uniformly scattered); avoid hull / spine; size variety. */
+  const nLiliesTarget = rInt(rand, 8, 22);
   const lilies = [];
-  for (let k = 0; k < nLilies && k < 560; k += 1) {
-    let x = 0;
-    let z = 0;
-    let ok = false;
-    for (let t = 0; t < 90; t += 1) {
-      x = rRange(rand, -CORE_LIM * 0.96, CORE_LIM * 0.96);
-      z = rRange(rand, -CORE_LIM * 0.96, CORE_LIM * 0.96);
-      const rad = rRange(rand, 2.35, 3.95);
-      if (!clearOfDiscs(x, z, rad + 2.8, excl)) continue;
-      ok = true;
-      lilies.push({ position: [x, rand() > 0.55 ? -0.04 : -0.12, z], radius: rad });
-      pushExcl(excl, { x, z, r: rad + 4.4 });
-      break;
+  let lilyPlaced = 0;
+  let clusterAttempts = 0;
+
+  while (lilyPlaced < nLiliesTarget && clusterAttempts < 440) {
+    clusterAttempts += 1;
+    const cx = rRange(rand, -CORE_LIM * 0.96, CORE_LIM * 0.96);
+    const cz = rRange(rand, -CORE_LIM * 0.96, CORE_LIM * 0.96);
+    /** Max spread of pads inside this patch (XZ). */
+    const clusterSpan = rRange(rand, 9.5, 44);
+    const anchorClear = clusterSpan + Math.min(16, clusterSpan * 0.52) + 8;
+    if (!clearOfDiscs(cx, cz, anchorClear, excl)) continue;
+
+    const remaining = nLiliesTarget - lilyPlaced;
+    const nHere =
+      remaining <= 1
+        ? 1
+        : rInt(rand, 2, Math.min(8, remaining));
+
+    let padsInBurst = 0;
+    for (let pi = 0; pi < nHere && lilyPlaced < nLiliesTarget; pi += 1) {
+      let x = 0;
+      let z = 0;
+      let ok = false;
+      for (let t = 0; t < 95; t += 1) {
+        const angle = rand() * Math.PI * 2;
+        /** First pad hugs cluster center slightly; later ones fill the patch. */
+        const distFrac = pi === 0 ? rRange(rand, 0.06, 0.72) : rRange(rand, 0.09, 1.02);
+        const jitter = 0.55 + rand() * 2.4;
+        x = cx + Math.cos(angle) * clusterSpan * distFrac + (rand() - 0.5) * jitter;
+        z = cz + Math.sin(angle) * clusterSpan * distFrac + (rand() - 0.5) * jitter;
+
+        x = Math.min(CORE_LIM * 0.98, Math.max(-CORE_LIM * 0.98, x));
+        z = Math.min(CORE_LIM * 0.98, Math.max(-CORE_LIM * 0.98, z));
+
+        const withinCluster =
+          Math.hypot(x - cx, z - cz) <= clusterSpan * 1.06 + jitter * 0.35;
+        if (!withinCluster) continue;
+
+        const u = rand();
+        let rad;
+        if (u < 0.07) rad = rRange(rand, 9.2, 17.5);
+        else if (u < 0.2) rad = rRange(rand, 0.48, 1.22);
+        else if (u < 0.48) rad = rRange(rand, 1.25, 3.05);
+        else rad = rRange(rand, 3.15, 6.45);
+        const exclR = rad + Math.min(10.5, 3.2 + rad * 0.42);
+        if (!clearOfDiscs(x, z, exclR, excl)) continue;
+        ok = true;
+        lilies.push({ position: [x, rand() > 0.55 ? -0.04 : -0.12, z], radius: rad });
+        pushExcl(excl, { x, z, r: exclR + 2.2 });
+        lilyPlaced += 1;
+        padsInBurst += 1;
+        break;
+      }
+      if (!ok) continue;
     }
-    if (!ok) continue;
+    /** Reserve open water around patches that spawned at least one pad. */
+    if (padsInBurst > 0) {
+      pushExcl(excl, { x: cx, z: cz, r: anchorClear * 0.58 });
+    }
   }
 
   /** Slow patches. */
@@ -297,6 +341,27 @@ export function generateProceduralTrackRaw(seedOpt) {
     food.push({ type: "protozoa", position: [sx + 72, 0.35, sz - 92], stacks: 1 });
   }
 
+  /** Micro grazer flocks — flee the swimmer until a dive splash bursts them into nibbles. */
+  const daphniaFlocksRaw = [];
+  const nDf = rInt(rand, 1, 5);
+  for (let hi = 0; hi < nDf; hi += 1) {
+    let placed = false;
+    for (let t = 0; t < 110 && !placed; t += 1) {
+      const fx = rRange(rand, -CORE_LIM * 0.9, CORE_LIM * 0.9);
+      const fz = rRange(rand, -CORE_LIM * 0.9, CORE_LIM * 0.9);
+      const spr = rRange(rand, 2.4, 5.95);
+      if (!clearOfDiscs(fx, fz, spr + 13, excl)) continue;
+      daphniaFlocksRaw.push({
+        position: [fx, 0.32, fz],
+        count: rInt(rand, 6, 14),
+        spread: spr,
+        fleeSpeed: rRange(rand, 6.05, 8.42),
+      });
+      pushExcl(excl, { x: fx, z: fz, r: spr + 11 });
+      placed = true;
+    }
+  }
+
   const seedShort = seed.toString(16).padStart(8, "0").slice(-6);
 
   return {
@@ -305,6 +370,7 @@ export function generateProceduralTrackRaw(seedOpt) {
       laps,
       lapScoreBonus: rInt(rand, 200, 280),
       allFoodClearBonus: rInt(rand, 455, 640),
+      courseRibbon: false,
     },
     spawn: {
       position: spawnPos,
@@ -318,6 +384,7 @@ export function generateProceduralTrackRaw(seedOpt) {
       racers,
       ripples,
       predators: predatorsInput,
+      daphnia: daphniaFlocksRaw,
     },
     food,
   };

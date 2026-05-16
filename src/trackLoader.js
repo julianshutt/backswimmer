@@ -22,6 +22,9 @@ function metaScore(md, srcRoot = {}) {
   );
   out.lapScoreBonus = clampNumScore(m.lapScoreBonus ?? m.pointsPerLap ?? srcRoot.lapScoreBonus, 230, 0, 500000);
 
+  /** When false, aqua spline + buoy gates are omitted (procedural exploratory pond). Default on. */
+  out.courseRibbon = m.courseRibbon !== false;
+
   return out;
 }
 
@@ -74,7 +77,7 @@ export function mergeTrackDefaults(raw) {
   const lilies = normList(obstacles.lilies).map((o) => ({
     kind: "lily",
     position: xz(o.position),
-    radius: clampNum(o.radius, 3, 0.5, 12),
+    radius: clampNum(o.radius, 3, 0.35, 24),
     y: num(o.position?.[1], 0),
   }));
 
@@ -141,6 +144,8 @@ export function mergeTrackDefaults(raw) {
   /** Hostile creatures (≠ edible `food`; e.g. parasitic mosquito larvae). */
   const predators = predatorInputs.map((o, i) => normalizePredator(o, i));
 
+  const daphniaFlocks = normalizeDaphniaFlocks(obstacles);
+
   const food = normList(src.food).map((f, i) => ({
     id: `${i}:${f?.type}`,
     type: typeof f?.type === "string" ? f.type : "protozoa",
@@ -162,6 +167,7 @@ export function mergeTrackDefaults(raw) {
     racers,
     ripples,
     predators,
+    daphniaFlocks,
     food,
   };
 }
@@ -217,9 +223,9 @@ const PRED_KIND_DEFAULTS = {
     radius: 0.58,
     hp: 2,
     damage: 11,
-    biteIntervalSec: 1.14,
-    engageRadius: 16.5,
-    chaseSpeed: 2.94,
+    biteIntervalSec: 0.98,
+    engageRadius: 36,
+    chaseSpeed: 5.15,
     venomSusceptibility: 1,
     shellContactBleed: null,
     visualMultiplier: 1,
@@ -298,8 +304,50 @@ const PRED_KIND_DEFAULTS = {
   },
 };
 
+/** Tiny fleeing cladoceran flocks — splash converts to nibbles. */
+function normalizeDaphniaFlocks(obstacles) {
+  const list = [...normList(obstacles?.daphnia), ...normList(obstacles?.daphnia_flocks)];
+  const dk = {
+    count: 8,
+    spread: 3.3,
+    fleeSpeed: 6.82,
+    scareRadius: 15,
+    bodyRadius: 0.34,
+    separationRadius: 0.62,
+    cohesionWeight: 0.48,
+    separationWeight: 2.08,
+    nibbleHealPer: 11,
+    splashHitRadius: 3.05,
+    pointValuePer: 26,
+  };
+  return list.map((raw, fi) => {
+    const r = raw && typeof raw === "object" ? raw : {};
+    const pos = vec3(r.position, [fi * 1.92 - 1, 0.32, -20 - fi * 4.8]);
+    return {
+      position: [...pos],
+      count: clampNum(r.count ?? r.flockSize ?? r.members ?? r.n, dk.count, 3, 22),
+      spread: clampNum(r.spread ?? r.radius ?? r.cluster, dk.spread, 0.75, 16),
+      fleeSpeed: clampNum(r.fleeSpeed, dk.fleeSpeed, 2, 17),
+      scareRadius: clampNum(r.scareRadius, dk.scareRadius, 4, 50),
+      bodyRadius: clampNum(r.bodyRadius, dk.bodyRadius, 0.14, 0.95),
+      separationRadius: clampNum(r.separationRadius, dk.separationRadius, 0.22, 1.95),
+      cohesionWeight: clampNum(r.cohesionWeight, dk.cohesionWeight, 0, 2.85),
+      separationWeight: clampNum(r.separationWeight, dk.separationWeight, 0, 7),
+      nibbleHealPer: clampNum(r.nibbleHealPer ?? r.nibbleHeal ?? r.heal ?? r.healEach, dk.nibbleHealPer, 1, 48),
+      splashHitRadius: clampNum(r.splashHitRadius ?? r.smashRadius, dk.splashHitRadius, 1.3, 8.8),
+      pointValuePer: clampNum(
+        r.pointValuePer ?? r.points ?? r.pointValue ?? r.scorePer,
+        dk.pointValuePer,
+        0,
+        500000
+      ),
+    };
+  });
+}
+
 /** Unknown kinds still hydrate as chunky grazers — keeps YAML exploratory. */
 const PRED_FALLBACK_KIND = {
+
   radius: 0.66,
   hp: 2,
   damage: 9.5,

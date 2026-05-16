@@ -1,0 +1,22 @@
+# Debug — planarian (spit toxin globs).
+metadata:
+  name: "Debug — planarian_spitter"
+  laps: 6
+  courseRibbon: false
+
+spawn:
+  position: [0, 0.35, 14]
+  yawDeg: 180
+
+checkpoints:
+  - position: [0, 0.35, -22]
+    radius: 16
+  - position: [0, 0.35, 18]
+    radius: 14
+
+food: []
+
+obstacles:
+  predators:
+    - type: planarian_spitter
+      position: [2, 0.38, -12]

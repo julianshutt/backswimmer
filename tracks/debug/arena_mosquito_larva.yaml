@@ -1,0 +1,22 @@
+# Debug: single grazing larva — open water + short lap loop.
+metadata:
+  name: "Debug — mosquito_larva"
+  laps: 6
+  courseRibbon: false
+
+spawn:
+  position: [0, 0.35, 14]
+  yawDeg: 180
+
+checkpoints:
+  - position: [0, 0.35, -22]
+    radius: 16
+  - position: [0, 0.35, 18]
+    radius: 14
+
+food: []
+
+obstacles:
+  predators:
+    - type: mosquito_larva
+      position: [0, 0.38, -10]

@@ -53,6 +53,19 @@ const COL_GREEN_HP_STR = "#3cf09a";
 const COL_ORANGE_HP_STR = "#ffb228";
 const COL_RED_HP_STR = "#ff2844";
 
+/**
+ * Bills HP sprites in local units instead of predator root {@link grp}.scale anatomical multiples,
+ * so viewport clamping does not crush huge grazers (e.g. waterscorpion).
+ */
+function attachHpStripForScaledPredator(grp, modelBaseScale, hpHud) {
+  const hudRoot = new THREE.Group();
+  hudRoot.scale.setScalar(1 / modelBaseScale);
+  hpHud.sprite.position.y *= modelBaseScale;
+  hudRoot.add(hpHud.sprite);
+  grp.add(hudRoot);
+  grp.userData.hpHud = hpHud;
+}
+
 /** Overhead HP strip sprites always face cam; `draw`(hpRemain01, dmgFrac01, dmgPulseOptional). */
 export function createHpStripSprite(scaleX = 2.55, scaleY = 0.54, yOffsetLocal = 2.78) {
   const canvas = document.createElement("canvas");
@@ -166,67 +179,85 @@ function roundRectPathStroke(ctx, x, y, w, h, r) {
   roundRectPath(ctx, x, y, w, h, r);
 }
 
-export function lilyGroup(radius) {
+/**
+ * @param {number} radius Lily pad horizontal scale (YAML / procedural).
+ * @param {THREE.MeshStandardMaterial | null | undefined} [sharedGrassMat] PBR lily material (cloned grass with mild repeat via {@link cloneGrassMaterialForBroadLeaves}); omit for flat green.
+ */
+export function lilyGroup(radius, sharedGrassMat) {
   const g = new THREE.Group();
   const padRot = Math.random() * Math.PI * 2;
+  const r = Math.max(Number(radius) || 1, 0.32);
 
-  const padMat = new THREE.MeshStandardMaterial({
-    color: COLORS.lilyPad,
-    roughness: 0.78,
-    metalness: 0.02,
-  });
-  const pad = new THREE.Mesh(
-    new THREE.CylinderGeometry(radius, radius * 0.97, 0.22, 28, 1),
-    padMat
-  );
-  pad.position.y = 0.11;
+  const padMat =
+    sharedGrassMat ??
+    new THREE.MeshStandardMaterial({
+      color: COLORS.lilyPad,
+      roughness: 0.78,
+      metalness: 0.02,
+      side: THREE.DoubleSide,
+    });
+
+  /** Central dish + monotonic swept profile → rolled peripheral wall / lip */
+  const padH = THREE.MathUtils.clamp(0.038 + r * 0.026, 0.042, 0.52);
+  const lipH = THREE.MathUtils.clamp(0.055 + r * 0.038, 0.065, 0.88);
+  const innerR = r * 0.72;
+  const shelfR = r * 0.9;
+  const lipOuter = r * 1.018;
+
+  const profile = [
+    new THREE.Vector2(0.006, 0),
+    new THREE.Vector2(innerR * 0.2, 0.014),
+    new THREE.Vector2(innerR * 0.74, padH * 0.26),
+    new THREE.Vector2(shelfR * 0.99, padH * 0.64),
+    new THREE.Vector2(lipOuter * 0.995, padH * 0.82),
+    new THREE.Vector2(lipOuter, padH * 0.58 + lipH),
+  ];
+  const latheSegs = Math.min(96, Math.max(26, Math.floor(r * 4.2)));
+  const padGeo = new THREE.LatheGeometry(profile, latheSegs);
+  padGeo.computeVertexNormals();
+  const pad = new THREE.Mesh(padGeo, padMat);
   pad.rotation.y = padRot;
-  pad.scale.set(1.08, 1, 0.91);
+  pad.scale.set(1.02, 1, 0.94);
   pad.castShadow = true;
   pad.receiveShadow = true;
   g.add(pad);
 
-  const rimRing = Math.min(44, Math.max(26, Math.floor(radius * 9)));
-  const rim = new THREE.Mesh(
-    new THREE.TorusGeometry(radius * 0.968, Math.max(radius * 0.048, 0.14), 4, rimRing),
-    new THREE.MeshStandardMaterial({
-      color: 0x57c55c,
-      roughness: 0.74,
-      metalness: 0.02,
-    })
-  );
-  rim.rotation.x = Math.PI / 2;
-  rim.position.y = 0.2;
-  rim.rotation.z = padRot + 0.22;
-  g.add(rim);
+  /** Veins overlay — toned down when a grass texture shows underneath. */
+  const grassy = !!padMat.map;
 
+  /** Subtle raised vein deck on top of the shelf (reads from chase cam). */
   const veinMat = new THREE.MeshStandardMaterial({
     color: 0xc4e894,
     roughness: 0.74,
     metalness: 0.01,
     transparent: true,
-    opacity: 0.74,
+    opacity: grassy ? 0.32 : 0.72,
     side: THREE.DoubleSide,
     depthWrite: false,
   });
-  for (let v = 0; v < 5; v += 1) {
-    const vn = new THREE.Mesh(
-      new THREE.PlaneGeometry(radius * 0.93, radius * 0.1),
-      veinMat
-    );
+  const nVeins = r < 1.2 ? 4 : r > 9 ? 9 : 6;
+  const veinW = THREE.MathUtils.clamp(r * 0.095, 0.07, 0.95);
+  for (let v = 0; v < nVeins; v += 1) {
+    const vn = new THREE.Mesh(new THREE.PlaneGeometry(r * 0.86, veinW), veinMat);
     vn.rotation.x = -Math.PI / 2;
-    vn.rotation.z = padRot + (v / 5) * Math.PI + 0.06;
-    vn.position.y = 0.203;
+    vn.rotation.z = padRot + (v / nVeins) * Math.PI + 0.07;
+    vn.position.y = padH * 0.92 + lipH * 0.22;
     g.add(vn);
   }
 
+  /** Radial pie-cut like many Nymphaea leaves. */
   const cut = new THREE.Mesh(
-    new THREE.CylinderGeometry(radius * 0.92, radius * 0.9, 0.04, 8, 1),
-    new THREE.MeshStandardMaterial({ color: 0xb8e986, transparent: true, opacity: 0.35 })
+    new THREE.CylinderGeometry(r * 0.88, r * 0.86, 0.05, 8, 1, false, 0.15, Math.PI * 1.72),
+    new THREE.MeshStandardMaterial({
+      color: grassy ? 0xa3bf8f : 0xb8e986,
+      transparent: true,
+      opacity: grassy ? 0.22 : 0.38,
+    })
   );
-  cut.position.y = 0.2;
-  cut.rotation.z = padRot + 0.94;
+  cut.position.y = padH * 0.78 + lipH * 0.12;
+  cut.rotation.y = padRot + 0.94;
   g.add(cut);
+
   return g;
 }
 
@@ -535,10 +566,128 @@ function hindOarLeg(mat, side) {
   return mount;
 }
 
+/**
+ * Beaded nematode chain in the water plane — serpentine motion via {@link advanceNematodeFoodAnim}.
+ * Root {@link THREE.Group} is placed at the YAML pickup center; collision still uses that anchor.
+ */
+function nematodeFoodGroup() {
+  const root = new THREE.Group();
+  const palette = FOOD_PALETTE.nematode || FOOD_PALETTE.protozoa;
+  const baseParams = {
+    color: palette,
+    roughness: 0.45,
+    metalness: 0.06,
+    emissive: 0x223344,
+    emissiveIntensity: 0.04,
+  };
+
+  const nSeg = 9;
+  /** @type {THREE.Mesh[]} */
+  const segs = [];
+  for (let i = 0; i < nSeg; i += 1) {
+    const t = i / Math.max(nSeg - 1, 1);
+    const rad = i === 0 ? 0.091 : THREE.MathUtils.lerp(0.084, 0.062, t);
+    const geom = new THREE.SphereGeometry(rad, 10, 8);
+    const smat = i === 0 ? new THREE.MeshStandardMaterial(baseParams) : segs[0].material.clone();
+    const m = new THREE.Mesh(geom, smat);
+    m.castShadow = true;
+    root.add(m);
+    segs.push(m);
+  }
+
+  const ang = Math.random() * Math.PI * 2;
+  root.userData.nematodeAnimate = true;
+  root.userData.nematodeSegs = segs;
+  root.userData.nematodeDirX = Math.cos(ang);
+  root.userData.nematodeDirZ = Math.sin(ang);
+  root.userData.nematodePhase = Math.random() * Math.PI * 2;
+  /** Lateral wiggle (world units) — keep large enough to read from chase cam. */
+  root.userData.nematodeAmp = 0.22 + Math.random() * 0.092;
+  root.userData.nematodeOmega = 4.85 + Math.random() * 2.2;
+  root.userData.nematodeSpacing = 0.11;
+  root.userData.nematodeTaper = 0.08;
+  return root;
+}
+
+/** @type {THREE.Vector3} */
+const _nemA = new THREE.Vector3();
+/** @type {THREE.Vector3} */
+const _nemY = new THREE.Vector3(0, 1, 0);
+
+/**
+ * @param {THREE.Group} group From {@link nematodeFoodGroup}
+ * @param {number} elapsed Sim time (s)
+ */
+export function advanceNematodeFoodAnim(group, elapsed) {
+  const segs = group.userData.nematodeSegs;
+  if (!Array.isArray(segs) || segs.length < 2) return;
+
+  const dx = group.userData.nematodeDirX ?? 1;
+  const dz = group.userData.nematodeDirZ ?? 0;
+  const px = -dz;
+  const pz = dx;
+  const phase = group.userData.nematodePhase ?? 0;
+  const amp = group.userData.nematodeAmp ?? 0.26;
+  const omega = group.userData.nematodeOmega ?? 5.2;
+  /** Slow along-spine squirm so motion isn’t only a static standing wave. */
+  const crawl = elapsed * 0.55;
+  const spacing = group.userData.nematodeSpacing ?? 0.11;
+  const taper = THREE.MathUtils.clamp(group.userData.nematodeTaper ?? 0.08, 0.03, 0.32);
+  const n = segs.length;
+
+  for (let i = 0; i < n; i += 1) {
+    const u = i / Math.max(n - 1, 1);
+    const along = i * spacing + crawl * 0.04;
+    const wave =
+      Math.sin(elapsed * omega + phase + i * 0.91 - crawl) +
+      0.4 * Math.sin(elapsed * omega * -1.45 + phase + i * 1.14 + crawl * 1.2);
+    const sway = amp * wave * (1 - u * taper);
+    const lift =
+      amp *
+      0.55 *
+      Math.cos(elapsed * omega * 1.02 + phase + i * 0.94 - crawl * 0.9) *
+      (1 - u * 0.42);
+    const x = dx * along + px * sway;
+    const y = lift;
+    const z = dz * along + pz * sway;
+    segs[i].position.set(x, y, z);
+  }
+
+  for (let i = 0; i < n - 1; i += 1) {
+    _nemA.subVectors(segs[i + 1].position, segs[i].position);
+    if (_nemA.lengthSq() < 1e-10) continue;
+    _nemA.normalize();
+    if (Math.abs(_nemA.y) > 0.998) continue;
+    segs[i].quaternion.setFromUnitVectors(_nemY, _nemA);
+  }
+  segs[n - 1].quaternion.copy(segs[n - 2].quaternion);
+}
+
+/**
+ * @param {{ active?: boolean; type?: string }[]} foodArr `track.food`
+ * @param {(THREE.Mesh | THREE.Group)[]} meshArr `foodMeshes`
+ * @param {number} elapsed
+ */
+export function updateFoodPickupAnimations(foodArr, meshArr, elapsed) {
+  if (!foodArr?.length || !meshArr?.length) return;
+  const n = Math.min(foodArr.length, meshArr.length);
+  for (let i = 0; i < n; i += 1) {
+    const fd = foodArr[i];
+    const m = meshArr[i];
+    if (!fd?.active) continue;
+    const typ = typeof fd.type === "string" ? fd.type.toLowerCase() : "";
+    if (typ !== "nematode") continue;
+    // Group with segment userData (not a plain pickup mesh)
+    if (!(m && m.visible && m.userData?.nematodeAnimate && m.userData?.nematodeSegs)) continue;
+    advanceNematodeFoodAnim(/** @type {THREE.Group} */ (m), elapsed);
+  }
+}
+
 export function foodMesh(kind) {
+  if (kind === "nematode") return nematodeFoodGroup();
+
   let geom;
-  if (kind === "nematode") geom = new THREE.CylinderGeometry(0.15, 0.15, 0.92, 8);
-  else if (kind === "mosquito_larva") geom = new THREE.CapsuleGeometry(0.18, 0.88, 4, 8);
+  if (kind === "mosquito_larva") geom = new THREE.CapsuleGeometry(0.18, 0.88, 4, 8);
   else geom = new THREE.OctahedronGeometry(0.48, 0);
 
   const mat = new THREE.MeshStandardMaterial({
@@ -553,8 +702,11 @@ export function foodMesh(kind) {
   return mesh;
 }
 
-/** Ephemeral grazing “nibble” — warm emissive crumb that decays unread for a moment. */
-export function preyNibbleMesh() {
+/** Ephemeral grazing “nibble” — warm emissive crumb that decays unread for a moment.
+ * @param {number} [visualScale] world size multiplier (tiny crumbs for bursts).
+ */
+export function preyNibbleMesh(visualScale = 1) {
+  const s = THREE.MathUtils.clamp(visualScale, 0.28, 1.45);
   const mat = new THREE.MeshStandardMaterial({
     color: COLORS.preyNibble,
     roughness: 0.42,
@@ -564,7 +716,7 @@ export function preyNibbleMesh() {
     transparent: true,
     opacity: 1,
   });
-  const mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.24, 1), mat);
+  const mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.24 * s, s <= 0.55 ? 0 : 1), mat);
   mesh.castShadow = false;
   mesh.receiveShadow = false;
   mesh.frustumCulled = false;
@@ -714,6 +866,7 @@ export function predatorMozzieMesh() {
   wakeRing.castShadow = false;
   wakeRing.receiveShadow = false;
   wakeRing.scale.setScalar(1 / SCALE);
+  grp.userData._mozzieWakeRingScaleXZ = wakeRing.scale.x;
 
   grp.userData.predWakeMat = wakeRing.material;
   grp.add(head, brushGrp, thorax, thoraxBulge, ...abdomenParts, siphonStem, siphonBell, wakeRing);
@@ -731,11 +884,256 @@ export function predatorMozzieMesh() {
   grp.userData.baseScale = SCALE;
 
   const hpHud = createHpStripSprite(2.95, 0.62, 2.98);
-  grp.add(hpHud.sprite);
-  grp.userData.hpHud = hpHud;
+  attachHpStripForScaledPredator(grp, SCALE, hpHud);
 
   grp.userData.idlePhase = Math.random() * Math.PI * 2;
+  grp.userData.mozzieRig = {
+    head,
+    thorax,
+    thoraxBulge,
+    abdomenSegments: abdomenParts,
+    brushGrp,
+    siphonStem,
+    baseSiphonRotX: siphonStem.rotation.x,
+    siphonBell,
+    wakeRing,
+  };
+
+  /** Authoritative anatomical rotations for wriggle posing (advance clears these each pose pass). */
+  for (const part of abdomenParts) part.userData.mozzieBaseRot = part.rotation.clone();
+  thorax.userData.mozzieBaseRot = thorax.rotation.clone();
+  thoraxBulge.userData.mozzieBaseRot = thoraxBulge.rotation.clone();
+  head.userData.mozzieBaseRot = head.rotation.clone();
+
   return grp;
+}
+
+/**
+ * Extreme attach / grapple motion on the larvae rig — thorax arcs, segmented abdomen thrashes,
+ * anterior brushes bite at the swimmer’s plating.
+ *
+ * `attackBlend` drives intensity (1 = glued full-on; 0 = idle swimming).
+ */
+export function poseMosquitoLarvaAttack(grp, attackBlend, timeSec, navRollRad = 0) {
+  const rig = grp.userData?.mozzieRig;
+  if (!rig) return;
+
+  const a = THREE.MathUtils.clamp(attackBlend, 0, 1);
+  const wr = timeSec * 22.4;
+  const wr2 = timeSec * 15.2;
+  const thr = Math.sin(wr2) * a * 0.31;
+  const thr2 = Math.sin(wr + 1.42) * a * 0.42;
+
+  if (rig.head?.userData?.mozzieBaseRot) rig.head.rotation.copy(rig.head.userData.mozzieBaseRot);
+  rig.head.rotation.x += Math.sin(wr + 1.96) * 0.058 + a * 0.92;
+  rig.head.rotation.z += Math.sin(wr2 * 1.06) * 0.22 * a + navRollRad * 0.18;
+  rig.head.rotation.y += Math.sin(timeSec * 17.85) * 0.11 * a;
+
+  if (rig.thorax?.userData?.mozzieBaseRot) rig.thorax.rotation.copy(rig.thorax.userData.mozzieBaseRot);
+  rig.thorax.rotation.x += a * (0.36 + thr);
+  rig.thorax.rotation.y += thr2 * a * 0.35;
+  rig.thorax.rotation.z += Math.cos(wr * 0.88) * 0.2 * a;
+
+  if (rig.thoraxBulge?.userData?.mozzieBaseRot) rig.thoraxBulge.rotation.copy(rig.thoraxBulge.userData.mozzieBaseRot);
+  rig.thoraxBulge.rotation.x += thr * 1.06 * a;
+
+  rig.brushGrp.rotation.x = -a * (0.48 + Math.abs(Math.sin(wr * 1.82)) * 0.92);
+  rig.brushGrp.rotation.z = Math.sin(wr * 2.06) * 0.48 * a;
+  rig.brushGrp.rotation.y = Math.sin(timeSec * 33.25) * 0.28 * a;
+
+  const segments = rig.abdomenSegments;
+  if (Array.isArray(segments)) {
+    for (let si = 0; si < segments.length; si += 1) {
+      const seg = segments[si];
+      if (!seg) continue;
+      if (seg.userData?.mozzieBaseRot) seg.rotation.copy(seg.userData.mozzieBaseRot);
+      const pg = si * 0.72;
+      seg.rotation.x += Math.sin(wr2 + pg) * 0.26 * a;
+      seg.rotation.y += Math.sin(wr * 0.95 + pg * 1.2) * 0.16 * a;
+      seg.rotation.z += Math.cos(wr * 1.14 + pg) * 0.19 * a;
+    }
+  }
+
+  const baseSR = typeof rig.baseSiphonRotX === "number" ? rig.baseSiphonRotX : -Math.PI * 2 * 0.18;
+  rig.siphonStem.rotation.x = baseSR + Math.sin(wr * 1.12) * 0.55 * a;
+  rig.siphonStem.rotation.y = Math.sin(timeSec * 28.85) * 0.22 * a;
+
+  const wrRef = grp.userData?._mozzieWakeRingScaleXZ;
+  if (rig.wakeRing && typeof wrRef === "number" && Number.isFinite(wrRef)) {
+    rig.wakeRing.scale.setScalar(wrRef * THREE.MathUtils.lerp(1, 1.92, a));
+  }
+}
+
+const MOZZIE_ATTACH_PLAYER_RUN = 68;
+/** Fallback if swimmer idles pinned — forces satiation & retreat. */
+const MOZZIE_ATTACH_MAX_SEC = 18.5;
+const MOZZIE_BACKOFF_SECONDS = 8.2;
+const MOZZIE_LATCH_TAILBACK = 0.58;
+const MOZZIE_ATTACH_STICK_SPEED_MUL = 2.08;
+const MOZZIE_STALK_CHASE_MUL = 1.12;
+const MOZZIE_HOME_PATROL_MUL = 0.88;
+const MOZZIE_BACKOFF_CHASE_MUL = 0.52;
+
+/** @typedef {{ mozziePhase?: number; mozzieAttachTravel?: number; mozzieAttachSec?: number; mozzieBackoffT?: number; _mozziePrevPX?: number; _mozziePrevPZ?: number }} MozzieLive */
+
+/**
+ * Hunger-state mosquito larva: patrols near home until prey enters aggression range, commits with a moderated chase,
+ * “glues” aft of the keel for a bounded run, then backs off toward home again.
+ */
+export function advanceMosquitoLarvaTowardPlayer(
+  grp,
+  dt,
+  playerRadius,
+  playerX,
+  playerZ,
+  playerYaw,
+  chaseSpeedBase,
+  anchorX,
+  anchorZ,
+  engageRadiusSq,
+  timeSec,
+  damageKickRad,
+  meleeHullR,
+  playerDeadOrFinished,
+  playerMarshConcealed,
+  live /** @type {MozzieLive} */
+) {
+  const lx = grp.position.x;
+  const lz = grp.position.z;
+  const vx0 = playerX - lx;
+  const vz0 = playerZ - lz;
+  const distSq = vx0 * vx0 + vz0 * vz0;
+  const dist = Math.sqrt(Math.max(distSq, 1e-10));
+
+  if (playerMarshConcealed) {
+    live.mozziePhase = 0;
+    live.mozzieAttachTravel = 0;
+    live.mozzieAttachSec = 0;
+  }
+
+  if (typeof live._mozziePrevPX !== "number") live._mozziePrevPX = playerX;
+  if (typeof live._mozziePrevPZ !== "number") live._mozziePrevPZ = playerZ;
+  const sw = Math.hypot(playerX - live._mozziePrevPX, playerZ - live._mozziePrevPZ);
+  live._mozziePrevPX = playerX;
+  live._mozziePrevPZ = playerZ;
+
+  if (typeof live.mozziePhase !== "number") live.mozziePhase = 0;
+  if (typeof live.mozzieAttachTravel !== "number") live.mozzieAttachTravel = 0;
+  if (typeof live.mozzieBackoffT !== "number") live.mozzieBackoffT = 0;
+  if (typeof live.mozzieAttachSec !== "number") live.mozzieAttachSec = 0;
+
+  const latchR = playerRadius + Math.max(meleeHullR, 0.12) * 0.88 + 0.38;
+  const latchSq = latchR * latchR;
+
+  if (playerDeadOrFinished) {
+    live.mozziePhase = 0;
+    live.mozzieAttachTravel = 0;
+    live.mozzieBackoffT = 0;
+    live.mozzieAttachSec = 0;
+  }
+
+  let tx = playerX;
+  let tz = playerZ;
+  let speedMul = MOZZIE_STALK_CHASE_MUL;
+
+  if (live.mozzieBackoffT > 0) {
+    live.mozzieBackoffT = Math.max(0, live.mozzieBackoffT - dt);
+    live.mozziePhase = 2;
+    live.mozzieAttachSec = 0;
+    const ph = grp.userData.idlePhase ?? 0;
+    const bob = Math.sin(timeSec * 0.82 + ph) * 0.08;
+    const bob2 = Math.cos(timeSec * 0.55 + ph * 1.31) * 0.075;
+    tx = anchorX + bob;
+    tz = anchorZ + bob2;
+    speedMul = MOZZIE_BACKOFF_CHASE_MUL;
+  } else if (live.mozziePhase === 1) {
+    live.mozzieAttachSec += dt;
+    live.mozzieAttachTravel += sw;
+    const sn = Math.sin(playerYaw);
+    const cs = Math.cos(playerYaw);
+    tx = playerX - sn * MOZZIE_LATCH_TAILBACK;
+    tz = playerZ - cs * MOZZIE_LATCH_TAILBACK;
+    speedMul = MOZZIE_ATTACH_STICK_SPEED_MUL;
+    if (
+      live.mozzieAttachTravel >= MOZZIE_ATTACH_PLAYER_RUN ||
+      live.mozzieAttachSec >= MOZZIE_ATTACH_MAX_SEC
+    ) {
+      live.mozziePhase = 2;
+      live.mozzieBackoffT = MOZZIE_BACKOFF_SECONDS;
+      live.mozzieAttachTravel = 0;
+      live.mozzieAttachSec = 0;
+      const ph = grp.userData.idlePhase ?? 0;
+      tx = anchorX + Math.sin(timeSec * 0.82 + ph) * 0.08;
+      tz = anchorZ + Math.cos(timeSec * 0.55 + ph * 1.31) * 0.075;
+      speedMul = MOZZIE_BACKOFF_CHASE_MUL;
+    }
+  } else {
+    /** Stalk — loaf near hatch until swimmer enters aggression bubble (`engageRadiusSq`). */
+    live.mozziePhase = 0;
+    live.mozzieAttachSec = 0;
+    const ph = grp.userData.idlePhase ?? 0;
+    const bobHome = Math.sin(timeSec * 0.82 + ph) * 0.065;
+    const bobHome2 = Math.cos(timeSec * 0.55 + ph * 1.31) * 0.058;
+    if (
+      !playerMarshConcealed &&
+      distSq <= engageRadiusSq &&
+      !playerDeadOrFinished &&
+      live.mozzieBackoffT <= 0
+    ) {
+      tx = playerX;
+      tz = playerZ;
+      speedMul = MOZZIE_STALK_CHASE_MUL;
+      if (distSq < latchSq) {
+        live.mozziePhase = 1;
+        live.mozzieAttachTravel = 0;
+        live.mozzieAttachSec = 0;
+        const sn = Math.sin(playerYaw);
+        const cs = Math.cos(playerYaw);
+        tx = playerX - sn * MOZZIE_LATCH_TAILBACK;
+        tz = playerZ - cs * MOZZIE_LATCH_TAILBACK;
+        speedMul = MOZZIE_ATTACH_STICK_SPEED_MUL;
+      }
+    } else {
+      tx = anchorX + bobHome;
+      tz = anchorZ + bobHome2;
+      speedMul = MOZZIE_HOME_PATROL_MUL;
+    }
+  }
+
+  let wx = tx - lx;
+  let wz = tz - lz;
+  const wl = Math.hypot(wx, wz);
+
+  const chaseSpeed = Math.max(Number(chaseSpeedBase) || 0, 0.08) * speedMul;
+  let moved = wl > 1e-4;
+  if (moved) {
+    const step = Math.min(chaseSpeed * dt, wl);
+    grp.position.x += (wx / wl) * step;
+    grp.position.z += (wz / wl) * step;
+    wx = wx / wl;
+    wz = wz / wl;
+    grp.rotation.y = -Math.atan2(wx, wz);
+  }
+
+  grp.rotation.order = "YXZ";
+  const id = grp.userData.idlePhase ?? 0;
+
+  /** Stronger visceral corkscrew whenever latched — damage kick still stacks. */
+  const stalkNear01 = THREE.MathUtils.smoothstep(
+    (latchR * 1.55 - dist) / Math.max(latchR * 0.88, 0.12),
+    0,
+    1
+  );
+  const attach01 = live.mozziePhase === 1 ? 1 : stalkNear01;
+  const baseRoll =
+    (moved ? Math.sin(timeSec * 10.5 + id) * 0.14 : Math.sin(timeSec * 7.25 + id) * 0.08) +
+    attach01 * Math.sin(timeSec * 31.2 + id) * 0.22;
+  const kick = typeof damageKickRad === "number" && Number.isFinite(damageKickRad) ? damageKickRad : 0;
+  grp.rotation.z = baseRoll + kick;
+
+  poseMosquitoLarvaAttack(grp, attach01, timeSec, grp.rotation.z * 0.35);
+
+  return moved;
 }
 
 /** Flatworm riff — S-curve ribbon gut, dorsal rose flush & eyespots, adhesive anterior disc & pharynx ring. */
@@ -855,8 +1253,7 @@ export function predatorPlanarianMesh() {
 
   grp.userData.baseScale = SCALE;
   const hpHud = createHpStripSprite(2.45, 0.58, 2.94);
-  grp.add(hpHud.sprite);
-  grp.userData.hpHud = hpHud;
+  attachHpStripForScaledPredator(grp, SCALE, hpHud);
   grp.userData.idlePhase = Math.random() * Math.PI * 2;
   return grp;
 }
@@ -1007,8 +1404,7 @@ export function predatorDaphnidMesh() {
 
   grp.userData.baseScale = SCALE;
   const hpHud = createHpStripSprite(1.78, 0.53, 2.74);
-  grp.add(hpHud.sprite);
-  grp.userData.hpHud = hpHud;
+  attachHpStripForScaledPredator(grp, SCALE, hpHud);
   grp.userData.idlePhase = Math.random() * Math.PI * 2;
   return grp;
 }
@@ -1116,8 +1512,7 @@ export function predatorHydraPodMesh() {
 
   grp.userData.baseScale = SCALE;
   const hpHud = createHpStripSprite(2.25, 0.55, 2.94);
-  grp.add(hpHud.sprite);
-  grp.userData.hpHud = hpHud;
+  attachHpStripForScaledPredator(grp, SCALE, hpHud);
   grp.userData.idlePhase = Math.random() * Math.PI * 2;
   return grp;
 }
@@ -1280,10 +1675,60 @@ export function predatorWaterScorpionTankMesh() {
 
   grp.userData.baseScale = SCALE;
   const hpHud = createHpStripSprite(3.4, 0.74, 3.72);
-  grp.add(hpHud.sprite);
-  grp.userData.hpHud = hpHud;
+  attachHpStripForScaledPredator(grp, SCALE, hpHud);
   grp.userData.idlePhase = Math.random() * Math.PI * 2;
   return grp;
+}
+
+/**
+ * Minute cladoceran micro-flock analogue — docile, no HUD; reads as jittery water fleas.
+ * @returns {THREE.Group}
+ */
+export function daphniaFlockMemberMesh() {
+  const g = new THREE.Group();
+  const shellMat = new THREE.MeshStandardMaterial({
+    color: COLORS.daphnidShell,
+    roughness: 0.41,
+    metalness: 0.042,
+    transparent: true,
+    opacity: 0.74,
+    emissive: 0x1a5c52,
+    emissiveIntensity: 0.05,
+    side: THREE.DoubleSide,
+  });
+  const bod = new THREE.Mesh(new THREE.SphereGeometry(0.15, 8, 6), shellMat);
+  bod.scale.set(1.05, 0.68, 1.26);
+  const eyeMat = new THREE.MeshStandardMaterial({
+    color: 0x040c10,
+    roughness: 0.54,
+    emissive: 0xffefb8,
+    emissiveIntensity: 0.22,
+    metalness: 0.07,
+  });
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(0.042, 6, 4), eyeMat);
+  eye.position.set(0, 0.036, 0.132);
+
+  const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.014, 0.54, 4, 1), shellMat.clone());
+  ant.rotation.set(0.26, -0.11, Math.PI / 5.2);
+  ant.position.set(0.1, 0.055, -0.02);
+  const antR = ant.clone();
+  antR.rotation.set(0.26, 0.11, -Math.PI / 5.2);
+  antR.position.set(-0.1, 0.055, -0.02);
+
+  const tail = new THREE.Mesh(new THREE.ConeGeometry(0.032, 0.15, 4), shellMat.clone());
+  tail.rotation.x = -Math.PI / 2 - 0.18;
+  tail.position.set(0, 0.016, -0.162);
+
+  g.add(bod, eye, ant, antR, tail);
+
+  g.traverse((o) => {
+    if ("isMesh" in o && o.isMesh && o.material && !Array.isArray(o.material)) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+      /** @type {THREE.Mesh} */ (o).frustumCulled = false;
+    }
+  });
+  return g;
 }
 
 export function predatorMesh(kind) {
@@ -1314,7 +1759,8 @@ export function advanceMozzieTowardPlayer(
   anchorZ,
   engageRadiusSq,
   timeSec,
-  damageKickRad = 0
+  damageKickRad = 0,
+  playerMarshConcealed = false
 ) {
   const lx = grp.position.x;
   const lz = grp.position.z;
@@ -1323,7 +1769,7 @@ export function advanceMozzieTowardPlayer(
   let tz = anchorZ;
   const vx = playerX - lx;
   const vz = playerZ - lz;
-  if (vx * vx + vz * vz <= engageRadiusSq) {
+  if (!playerMarshConcealed && vx * vx + vz * vz <= engageRadiusSq) {
     tx = playerX;
     tz = playerZ;
   } else {
