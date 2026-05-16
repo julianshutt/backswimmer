@@ -24,6 +24,8 @@ export const COLORS = {
   hydraGlow: 0xc8fff1,
   scorpionHull: 0x5f4f38,
   scorpionAccent: 0xb89b6b,
+  /** Ephemeral prey-chunk pickup (hemolymph nibble). */
+  preyNibble: 0xffe8aa,
 };
 
 const COL_GREEN_HP_STR = "#3cf09a";
@@ -424,6 +426,27 @@ export function foodMesh(kind) {
   });
   const mesh = new THREE.Mesh(geom, mat);
   mesh.castShadow = true;
+  return mesh;
+}
+
+/** Ephemeral grazing “nibble” — warm emissive crumb that decays unread for a moment. */
+export function preyNibbleMesh() {
+  const mat = new THREE.MeshStandardMaterial({
+    color: COLORS.preyNibble,
+    roughness: 0.42,
+    metalness: 0.04,
+    emissive: 0x8af5cf,
+    emissiveIntensity: 0.52,
+    transparent: true,
+    opacity: 1,
+  });
+  const mesh = new THREE.Mesh(new THREE.OctahedronGeometry(0.24, 1), mat);
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 4;
+  mesh.rotation.z = Math.random() * Math.PI;
+  mesh.rotation.y = Math.random() * Math.PI;
   return mesh;
 }
 

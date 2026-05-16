@@ -10,6 +10,7 @@ import {
   rivalGroup,
   boatGroup,
   foodMesh,
+  preyNibbleMesh,
   advanceFish,
   advanceRival,
   predatorMesh,
@@ -121,6 +122,19 @@ const VENOM_HIT_BURST_SECONDS = 0.3;
 const VENOM_BROAD_SQ_PAD = (VENOM_BITE_RANGE + 17) ** 2;
 
 const ENEMY_BOLT_POOL = 56;
+/** Seconds before an uncollected grazing nibble winks out. */
+const NIBBLE_LIFETIME_SEC = 3.05;
+/** Final fraction of life used to ramp opacity toward zero. */
+const NIBBLE_FADE_FRAC = 0.52;
+/** Pickup overlap vs hull (XZ disk). */
+const NIBBLE_PICKUP_RADIUS = 0.5;
+/** Max nibbles concurrently (oldest recycled). */
+const NIBBLE_DROP_CAP = 36;
+/** Hull repair scales slightly with the venom chip that drew blood. */
+const NIBBLE_HEAL_BASE = 4.15;
+const NIBBLE_HEAL_PER_CHIP = 2.08;
+const NIBBLE_HEAL_MAX = 18.5;
+
 /** Small grazing heal when pickups are swallowed. */
 const FOOD_HEAL = 7;
 
@@ -230,6 +244,10 @@ export class Game {
     /** @type {{ mesh: THREE.Mesh; x: number; z: number; vx: number; vz: number; ttl: number; dmg: number; pr: number }[]} */
     this.enemyBolts = [];
 
+    /** Ephemeral grazing nibbles spun off wounded predators (venom-drawn bleed). */
+    /** @type {{ mesh: THREE.Mesh; baseY: number; ttl: number; ttlMax: number; heal: number; bobPh: number }[]} */
+    this.nibbleDrops = [];
+
     this._predWeakScratch = new THREE.Vector3();
     this._predSpawnScratch = new THREE.Vector3();
 
@@ -291,6 +309,10 @@ export class Game {
     window.removeEventListener("resize", this.resize);
     window.removeEventListener("keydown", this.boundKeyDown);
     window.removeEventListener("keyup", this.boundKeyUp);
+    if (this.scene) {
+      this.releaseEnemyRangedBolts();
+      this.clearPreyNibbles();
+    }
     while (this.scene && this.scene.children.length) {
       const obj = this.scene.children[0];
       this.disposeObject(obj);
@@ -371,6 +393,8 @@ export class Game {
     this.playerDmgFlashT = 0;
     this._playerHudSnap = "";
     this.releaseEnemyRangedBolts();
+    this.clearPreyNibbles();
+    this.clearPreyNibbles();
 
     let i = 0;    for (const fd of this.track.food) {
       fd.active = true;
@@ -833,6 +857,99 @@ export class Game {
     }
   }
 
+  disposePreyNibble(/** @type {THREE.Mesh | null} */ mesh) {
+    if (!mesh) return;
+    mesh.removeFromParent();
+    mesh.geometry?.dispose?.();
+    const mt = mesh.material;
+    if (mt) (Array.isArray(mt) ? mt : [mt]).forEach((mu) => mu?.dispose?.());
+  }
+
+  clearPreyNibbles() {
+    for (const n of this.nibbleDrops) {
+      if (n?.mesh) this.disposePreyNibble(n.mesh);
+    }
+    this.nibbleDrops.length = 0;
+  }
+
+  /** Hemolymph nibbles peeled off grazing prey whenever venom actually draws ichor (`hpNow` drops). */
+  spawnPreyNibble(wx, wy, wz, healAmount) {
+    if (!this.scene) return;
+
+    while (this.nibbleDrops.length >= NIBBLE_DROP_CAP) {
+      const stale = this.nibbleDrops.shift();
+      if (stale?.mesh) this.disposePreyNibble(stale.mesh);
+    }
+
+    const mesh = preyNibbleMesh();
+    mesh.position.set(wx, wy, wz);
+    mesh.scale.setScalar(0.88 + Math.random() * 0.18);
+    this.scene.add(mesh);
+
+    const ttlMax = NIBBLE_LIFETIME_SEC;
+    const mat = /** @type {THREE.MeshStandardMaterial} */ (mesh.material);
+    mat.opacity = 1;
+
+    this.nibbleDrops.push({
+      mesh,
+      baseY: mesh.position.y,
+      ttl: ttlMax,
+      ttlMax,
+      heal: healAmount,
+      bobPh: Math.random() * Math.PI * 2,
+    });
+  }
+
+  updatePreyNibbles(dt, timeSec) {
+    if (!this.track || dt <= 0) return;
+
+    const px = this.pos.x;
+    const pz = this.pos.z;
+
+    for (let i = this.nibbleDrops.length - 1; i >= 0; i -= 1) {
+      const n = this.nibbleDrops[i];
+      const mesh = n.mesh;
+
+      n.ttl -= dt;
+      const bob = Math.sin(timeSec * 9.65 + n.bobPh) * 0.07;
+      mesh.position.y = n.baseY + bob;
+      mesh.rotation.x += dt * 1.25;
+      mesh.rotation.y += dt * 0.95;
+
+      const fadeW = Math.max(n.ttlMax * NIBBLE_FADE_FRAC, 1e-3);
+      const mat = /** @type {THREE.MeshStandardMaterial | undefined} */ (mesh.material);
+      if (mat) {
+        if (n.ttl < fadeW) {
+          mat.opacity = THREE.MathUtils.clamp(THREE.MathUtils.smoothstep(n.ttl / fadeW, 0, 1), 0, 1);
+        } else mat.opacity = 1;
+      }
+
+      if (!this.playerDead && !this.finished && n.heal > 0) {
+        if (
+          this.collideDisk(
+            px,
+            pz,
+            mesh.position.x,
+            mesh.position.z,
+            PLAYER_RADIUS,
+            NIBBLE_PICKUP_RADIUS
+          )
+        ) {
+          this.health = Math.min(this.healthMax, this.health + n.heal);
+          this._playerHudSnap = "";
+          this.disposePreyNibble(mesh);
+          this.nibbleDrops.splice(i, 1);
+          continue;
+        }
+      }
+
+      if (n.ttl <= 0) {
+        this.disposePreyNibble(mesh);
+        this.nibbleDrops.splice(i, 1);
+      }
+    }
+  }
+
   predatorMeleeEnvelopeRadius(grp, pd) {
     let rr = pd.radius;
     const ws = pd.weakSpots;
@@ -1025,6 +1142,16 @@ export class Game {
           0.28 + THREE.MathUtils.clamp(distMult * vulnVen, 0, 4) * 0.54
         );
         grp.userData._predHudSnap = "";
+
+        const nibHeal = THREE.MathUtils.clamp(
+          NIBBLE_HEAL_BASE + chip * NIBBLE_HEAL_PER_CHIP,
+          3.85,
+          NIBBLE_HEAL_MAX
+        );
+        const jx = (Math.random() - 0.5) * 1.35;
+        const jz = (Math.random() - 0.5) * 1.35;
+        const sy = grp.userData.baseY ?? grp.position.y;
+        this.spawnPreyNibble(grp.position.x + jx, sy + 0.14, grp.position.z + jz, nibHeal);
       }
       if (live.hpNow <= 0) {
         live.hpNow = 0;
@@ -1430,6 +1557,8 @@ export class Game {
 
     this.advanceEnemyRangedBolts(dt, this.pos.x, this.pos.z);
 
+    this.updatePreyNibbles(dt, time);
+
     for (let i = 0; i < this.track.food.length; i++) {
       const fd = this.track.food[i];
       if (!fd.active || this.playerDead) continue;
@@ -1599,6 +1728,19 @@ export class Game {
 
     const hpW = THREE.MathUtils.clamp((this.health / Math.max(this.healthMax, 1)) * 100, 0, 100);
     const vnW = THREE.MathUtils.clamp((this.venom / Math.max(this.venomMax, 1)) * 100, 0, 100);
+    const venomBiteCostPct = THREE.MathUtils.clamp(
+      (VENOM.biteCost / Math.max(this.venomMax, 1e-6)) * 100,
+      0,
+      100
+    );
+    const venomBelowAttack = this.venom < VENOM.biteCost;
+    const vnFillBg = venomBelowAttack
+      ? "linear-gradient(90deg,#4a4a52,#6f6d78)"
+      : "linear-gradient(90deg,#7b5bdc,#cfa8ff)";
+    const vnTrackBorder = venomBelowAttack
+      ? "1px solid rgba(120,118,132,.52)"
+      : "1px solid rgba(210,180,255,.24)";
+    const vnLabelTone = venomBelowAttack ? "opacity:.72;color:#cfd0dc" : "opacity:.82";
 
     let hurt = "";
     if (this.playerDead) {
@@ -1616,8 +1758,8 @@ export class Game {
   <div style="margin-top:2px;height:9px;background:rgba(0,0,0,.3);border-radius:4px;overflow:hidden;border:1px solid rgba(180,235,215,.28)"><div style="height:100%;width:${escapeHtml(String(hpW.toFixed(1)))}%;background:linear-gradient(90deg,#2ad8a9,#71f0c9)"></div></div>
 </div>
 <div>
-  <span style="opacity:.82;font-size:11px">Venom saliva (${Math.round(this.venom)}/${Math.round(this.venomMax)})${surgeNote}</span>
-  <div style="margin-top:2px;height:9px;background:rgba(0,0,0,.3);border-radius:4px;overflow:hidden;border:1px solid rgba(210,180,255,.24)"><div style="height:100%;width:${escapeHtml(String(vnW.toFixed(1)))}%;background:linear-gradient(90deg,#7b5bdc,#cfa8ff)"></div></div>
+  <span style="font-size:11px;${vnLabelTone}">Venom saliva (${Math.round(this.venom)}/${Math.round(this.venomMax)})${surgeNote}</span>
+  <div style="margin-top:2px;height:9px;background:rgba(0,0,0,.32);border-radius:4px;overflow:hidden;border:${vnTrackBorder};position:relative"><div style="height:100%;width:${escapeHtml(String(vnW.toFixed(1)))}%;background:${vnFillBg}"></div><div aria-hidden="true" style="pointer-events:none;position:absolute;top:0;bottom:0;left:${escapeHtml(venomBiteCostPct.toFixed(2))}%;width:1px;background:rgba(255,255,255,0.22);box-shadow:0 0 2px rgba(0,0,0,.5)"></div></div>
 </div>
 </div>`;
 
